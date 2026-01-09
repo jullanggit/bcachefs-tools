@@ -53,6 +53,7 @@ struct evacuate_bucket_arg {
 	struct data_update_opts	data_opts;
 };
 
+// a predicate of whether to evacuate a given bucket.
 static int evacuate_bucket_pred(struct btree_trans *, void *,
 				enum btree_id, struct bkey_s_c,
 				struct bch_inode_opts *,
