@@ -25,7 +25,9 @@ pub fn fmt_sectors_human(sectors: u64) -> String {
 
 pub fn fmt_bytes_human(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "K", "M", "G", "T", "P"];
-    if bytes == 0 { return "0B".to_string() }
+    if bytes == 0 {
+        return "0B".to_string();
+    }
     let mut val = bytes as f64;
     for unit in UNITS {
         if val < 1024.0 || *unit == "P" {
@@ -87,7 +89,8 @@ pub fn read_flag_list(s: &str, list: &[*const c_char], what: &str) -> Result<u64
 }
 
 pub fn run_tui<F>(f: F) -> Result<()>
-where F: FnOnce(&mut io::Stdout) -> Result<()>
+where
+    F: FnOnce(&mut io::Stdout) -> Result<()>,
 {
     let mut stdout = io::stdout();
     terminal::enable_raw_mode()?;

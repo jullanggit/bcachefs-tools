@@ -15,8 +15,8 @@ use crossterm::{
 use crate::util::run_tui;
 use crate::wrappers::accounting::{self, DiskAccountingKind};
 use crate::wrappers::handle::BcachefsHandle;
-use bch_bindgen::printbuf::Printbuf;
 use crate::wrappers::sysfs;
+use bch_bindgen::printbuf::Printbuf;
 
 use c::bch_reconcile_accounting_type::*;
 use c::disk_accounting_type::*;
@@ -37,25 +37,35 @@ enum ReconcileType {
 impl ReconcileType {
     fn as_c(self) -> c::bch_reconcile_accounting_type {
         match self {
-            Self::Replicas     => BCH_RECONCILE_ACCOUNTING_replicas,
-            Self::Checksum     => BCH_RECONCILE_ACCOUNTING_checksum,
-            Self::ErasureCode  => BCH_RECONCILE_ACCOUNTING_erasure_code,
-            Self::Compression  => BCH_RECONCILE_ACCOUNTING_compression,
-            Self::Target       => BCH_RECONCILE_ACCOUNTING_target,
+            Self::Replicas => BCH_RECONCILE_ACCOUNTING_replicas,
+            Self::Checksum => BCH_RECONCILE_ACCOUNTING_checksum,
+            Self::ErasureCode => BCH_RECONCILE_ACCOUNTING_erasure_code,
+            Self::Compression => BCH_RECONCILE_ACCOUNTING_compression,
+            Self::Target => BCH_RECONCILE_ACCOUNTING_target,
             Self::HighPriority => BCH_RECONCILE_ACCOUNTING_high_priority,
-            Self::Pending      => BCH_RECONCILE_ACCOUNTING_pending,
-            Self::Stripes      => BCH_RECONCILE_ACCOUNTING_stripes,
+            Self::Pending => BCH_RECONCILE_ACCOUNTING_pending,
+            Self::Stripes => BCH_RECONCILE_ACCOUNTING_stripes,
         }
     }
 
     fn all() -> Vec<Self> {
-        vec![Self::Replicas, Self::Checksum, Self::ErasureCode,
-             Self::Compression, Self::Target, Self::HighPriority,
-             Self::Pending, Self::Stripes]
+        vec![
+            Self::Replicas,
+            Self::Checksum,
+            Self::ErasureCode,
+            Self::Compression,
+            Self::Target,
+            Self::HighPriority,
+            Self::Pending,
+            Self::Stripes,
+        ]
     }
 
     fn all_except_pending() -> Vec<Self> {
-        Self::all().into_iter().filter(|t| *t != Self::Pending).collect()
+        Self::all()
+            .into_iter()
+            .filter(|t| *t != Self::Pending)
+            .collect()
     }
 }
 
@@ -105,7 +115,8 @@ fn reconcile_status_to_text(
         .map(|s| s.trim().parse::<u64>().unwrap_or(0))
         .unwrap_or(0);
 
-    let result = handle.query_accounting(1 << BCH_DISK_ACCOUNTING_reconcile_work as u32)
+    let result = handle
+        .query_accounting(1 << BCH_DISK_ACCOUNTING_reconcile_work as u32)
         .map_err(|e| anyhow!("query_accounting: {}", e))?;
 
     // Build array of [data_sectors, metadata_sectors] per reconcile type
@@ -195,10 +206,14 @@ pub fn cmd_reconcile_wait(argv: Vec<String>) -> Result<()> {
         let mut out = Printbuf::new();
         out.set_human_readable(true);
 
-        let pending = reconcile_status_to_text(&mut out, &handle, &sysfs_path, &types)
-            .unwrap_or(false);
+        let pending =
+            reconcile_status_to_text(&mut out, &handle, &sysfs_path, &types).unwrap_or(false);
 
-        execute!(stdout, cursor::MoveTo(0, 0), terminal::Clear(ClearType::All))?;
+        execute!(
+            stdout,
+            cursor::MoveTo(0, 0),
+            terminal::Clear(ClearType::All)
+        )?;
         write!(stdout, "{}", out)?;
         stdout.flush()?;
 
@@ -210,11 +225,15 @@ pub fn cmd_reconcile_wait(argv: Vec<String>) -> Result<()> {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(())
+                    }
                     _ => {}
                 }
             }
-            while event::poll(Duration::ZERO)? { let _ = event::read()?; }
+            while event::poll(Duration::ZERO)? {
+                let _ = event::read()?;
+            }
         }
     })
 }

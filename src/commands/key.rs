@@ -88,8 +88,7 @@ fn parse_device_list(args: &[String]) -> Vec<PathBuf> {
 fn open_nostart(devs: &[PathBuf]) -> Result<Fs> {
     let mut opts = c::bch_opts::default();
     opt_set!(opts, nostart, 1);
-    Fs::open(devs, opts)
-        .map_err(|e| anyhow::anyhow!("Error opening {:?}: {}", devs, e))
+    Fs::open(devs, opts).map_err(|e| anyhow::anyhow!("Error opening {:?}: {}", devs, e))
 }
 
 /// Open filesystem, verify encryption is enabled, and verify the current passphrase.
@@ -103,9 +102,10 @@ fn open_and_verify(devs: &[PathBuf]) -> Result<(Fs, bch_key)> {
     }
 
     let uuid = sb_handle.sb().uuid();
-    let old_passphrase = Passphrase::new_from_prompt(&uuid)
-        .context("reading current passphrase")?;
-    let (_, sb_key) = old_passphrase.check(sb_handle)
+    let old_passphrase =
+        Passphrase::new_from_prompt(&uuid).context("reading current passphrase")?;
+    let (_, sb_key) = old_passphrase
+        .check(sb_handle)
         .context("verifying current passphrase")?;
 
     Ok((fs, sb_key.key))
@@ -132,8 +132,7 @@ pub fn cmd_set_passphrase(argv: Vec<String>) -> Result<()> {
     let cli = SetPassphraseCli::parse_from(argv);
     let (fs, raw_key) = open_and_verify(&parse_device_list(&cli.devices))?;
 
-    let new_passphrase = Passphrase::new_from_prompt_twice()
-        .context("reading new passphrase")?;
+    let new_passphrase = Passphrase::new_from_prompt_twice().context("reading new passphrase")?;
 
     let encrypted_key = new_passphrase.encrypt_key(fs.sb_handle(), &raw_key);
 
@@ -160,7 +159,9 @@ pub fn cmd_remove_passphrase(argv: Vec<String>) -> Result<()> {
     let cli = RemovePassphraseCli::parse_from(argv);
     let (fs, raw_key) = open_and_verify(&parse_device_list(&cli.devices))?;
 
-    unsafe { set_crypt_key(&fs, unencrypted_key(&raw_key)); }
+    unsafe {
+        set_crypt_key(&fs, unencrypted_key(&raw_key));
+    }
     fs.write_super();
 
     Ok(())

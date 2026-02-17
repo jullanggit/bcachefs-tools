@@ -267,8 +267,8 @@ pub extern "C" fn bch2_format(
     let sb_handle = &mut *sb;
     let foreground = parse_target(sb_handle, dev_slice, target_strs.foreground_target);
     let background = parse_target(sb_handle, dev_slice, target_strs.background_target);
-    let promote    = parse_target(sb_handle, dev_slice, target_strs.promote_target);
-    let metadata   = parse_target(sb_handle, dev_slice, target_strs.metadata_target);
+    let promote = parse_target(sb_handle, dev_slice, target_strs.promote_target);
+    let metadata = parse_target(sb_handle, dev_slice, target_strs.metadata_target);
     let sb_ref = unsafe { &mut *sb.sb };
     sb_ref.set_sb_foreground_target(foreground as u64);
     sb_ref.set_sb_background_target(background as u64);
@@ -277,8 +277,7 @@ pub extern "C" fn bch2_format(
 
     // Encryption
     if opts.encrypted {
-        let crypt_size =
-            std::mem::size_of::<c::bch_sb_field_crypt>() / std::mem::size_of::<u64>();
+        let crypt_size = std::mem::size_of::<c::bch_sb_field_crypt>() / std::mem::size_of::<u64>();
         let crypt = unsafe {
             c::bch2_sb_field_resize_id(
                 &mut *sb,
@@ -358,9 +357,9 @@ pub extern "C" fn bch2_format_for_device_add(
     opt_set!(fs_opts, btree_node_size, btree_node_size);
 
     let devs = c::dev_opts_list {
-        nr: 1,
-        size: 1,
-        data: dev,
+        nr:           1,
+        size:         1,
+        data:         dev,
         preallocated: Default::default(),
     };
 
@@ -381,8 +380,7 @@ pub(crate) fn format_opts_default() -> c::format_opts {
         .status();
 
     let kernel_version = crate::wrappers::sysfs::bcachefs_kernel_version() as u32;
-    let current =
-        c::bcachefs_metadata_version::bcachefs_metadata_version_max as u32 - 1;
+    let current = c::bcachefs_metadata_version::bcachefs_metadata_version_max as u32 - 1;
 
     let version = if kernel_version > 0 {
         current.min(kernel_version)
@@ -448,7 +446,9 @@ pub fn pick_bucket_size(opts: &c::bch_opts, devs: &[c::dev_opts]) -> u64 {
             let path = if dev.path.is_null() {
                 "<unknown>".to_string()
             } else {
-                unsafe { CStr::from_ptr(dev.path) }.to_string_lossy().into_owned()
+                unsafe { CStr::from_ptr(dev.path) }
+                    .to_string_lossy()
+                    .into_owned()
             };
             panic!(
                 "cannot format {}, too small ({} bytes, min {})",
@@ -504,9 +504,7 @@ pub fn check_bucket_size(opts: &c::bch_opts, dev: &c::dev_opts) {
         );
     }
 
-    if opt_defined!(opts, btree_node_size) != 0
-        && dev.opts.bucket_size < opts.btree_node_size
-    {
+    if opt_defined!(opts, btree_node_size) != 0 && dev.opts.bucket_size < opts.btree_node_size {
         panic!(
             "Bucket size ({}) cannot be smaller than btree node size ({})",
             dev.opts.bucket_size, opts.btree_node_size
@@ -535,4 +533,3 @@ pub extern "C" fn bch2_pick_bucket_size(opts: c::bch_opts, devs: c::dev_opts_lis
 pub extern "C" fn bch2_check_bucket_size(opts: c::bch_opts, dev: *mut c::dev_opts) {
     check_bucket_size(&opts, unsafe { &*dev });
 }
-

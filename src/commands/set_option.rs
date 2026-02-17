@@ -19,23 +19,28 @@ pub fn set_option_cmd() -> Command {
     Command::new("set-fs-option")
         .about("Set a filesystem option")
         .args(bch_option_args(opt_flags()))
-        .arg(Arg::new("dev-idx")
-            .short('d')
-            .long("dev-idx")
-            .action(ArgAction::Append)
-            .value_parser(clap::value_parser!(u32))
-            .help("Device index for device-specific options"))
-        .arg(Arg::new("devices")
-            .required(true)
-            .action(ArgAction::Append)
-            .help("Device path(s)"))
+        .arg(
+            Arg::new("dev-idx")
+                .short('d')
+                .long("dev-idx")
+                .action(ArgAction::Append)
+                .value_parser(clap::value_parser!(u32))
+                .help("Device index for device-specific options"),
+        )
+        .arg(
+            Arg::new("devices")
+                .required(true)
+                .action(ArgAction::Append)
+                .help("Device path(s)"),
+        )
 }
 
 pub fn cmd_set_option(argv: Vec<String>) -> Result<()> {
     let matches = set_option_cmd().get_matches_from(argv);
 
     let devices: Vec<&String> = matches.get_many::<String>("devices").unwrap().collect();
-    let dev_idxs: Vec<u32> = matches.get_many::<u32>("dev-idx")
+    let dev_idxs: Vec<u32> = matches
+        .get_many::<u32>("dev-idx")
         .map(|v| v.copied().collect())
         .unwrap_or_default();
 
@@ -123,7 +128,13 @@ fn set_option_offline(
         let c_value = CString::new(value.as_str())?;
         let mut val: u64 = 0;
         let ret = unsafe {
-            c::bch2_opt_parse(fs.raw, opt, c_value.as_ptr(), &mut val, std::ptr::null_mut())
+            c::bch2_opt_parse(
+                fs.raw,
+                opt,
+                c_value.as_ptr(),
+                &mut val,
+                std::ptr::null_mut(),
+            )
         };
         if ret < 0 {
             eprintln!("Error parsing {name}={value}");
@@ -138,16 +149,19 @@ fn set_option_offline(
                 eprintln!("Error setting {name}: {ret}");
                 continue;
             }
-            unsafe { c::bch2_opt_set_sb(fs.raw, std::ptr::null_mut(), opt, val); }
+            unsafe {
+                c::bch2_opt_set_sb(fs.raw, std::ptr::null_mut(), opt, val);
+            }
         }
 
         if flags & c::opt_flags::OPT_DEVICE as u32 != 0 {
             let indices: Vec<u32> = if !dev_idxs.is_empty() {
                 dev_idxs.to_vec()
             } else {
-                devices.iter().filter_map(|dev| {
-                    name_to_dev_idx(fs.raw, dev).map(|i| i as u32)
-                }).collect()
+                devices
+                    .iter()
+                    .filter_map(|dev| name_to_dev_idx(fs.raw, dev).map(|i| i as u32))
+                    .collect()
             };
 
             for idx in indices {
@@ -157,14 +171,14 @@ fn set_option_offline(
                     continue;
                 }
 
-                let ret = unsafe {
-                    c::bch2_opt_hook_pre_set(fs.raw, ca, 0, opt_id, val, true)
-                };
+                let ret = unsafe { c::bch2_opt_hook_pre_set(fs.raw, ca, 0, opt_id, val, true) };
                 if ret < 0 {
                     eprintln!("Error setting {name}: {ret}");
                     continue;
                 }
-                unsafe { c::bch2_opt_set_sb(fs.raw, ca, opt, val); }
+                unsafe {
+                    c::bch2_opt_set_sb(fs.raw, ca, opt, val);
+                }
             }
         }
     }
@@ -176,7 +190,9 @@ fn name_to_dev_idx(c: *mut c::bch_fs, name: &str) -> Option<usize> {
     let devs_len = unsafe { (*c).devs.len() };
     for i in 0..devs_len {
         let ca = unsafe { (*c).devs[i] };
-        if ca.is_null() { continue; }
+        if ca.is_null() {
+            continue;
+        }
         let ca_name = unsafe { CStr::from_ptr((*ca).name.as_ptr()) };
         if ca_name.to_bytes() == name.as_bytes() {
             return Some(i);

@@ -15,7 +15,7 @@
 // bch_opt_strs. When a bare path argument is seen, it captures whatever
 // per-device options preceded it.
 
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{c_char, CStr, CString};
 use std::io;
 use std::path::PathBuf;
 use std::process;
@@ -28,9 +28,9 @@ use bch_bindgen::opt_set;
 use crate::commands::opts::{bch_opt_lookup, opts_usage_str, parse_opt_val};
 use crate::key::Passphrase;
 use crate::util::parse_human_size;
-use bch_bindgen::printbuf::Printbuf;
 use crate::wrappers::super_io::SUPERBLOCK_SIZE_DEFAULT;
 use crate::wrappers::sysfs;
+use bch_bindgen::printbuf::Printbuf;
 
 const BCH_REPLICAS_MAX: u32 = 4;
 
@@ -59,10 +59,7 @@ fn format_usage() {
         c::opt_flags::OPT_FORMAT as u32 | c::opt_flags::OPT_FS as u32,
         c::opt_flags::OPT_DEVICE as u32,
     );
-    let dev_opts = opts_usage_str(
-        c::opt_flags::OPT_DEVICE as u32,
-        c::opt_flags::OPT_FS as u32,
-    );
+    let dev_opts = opts_usage_str(c::opt_flags::OPT_DEVICE as u32, c::opt_flags::OPT_FS as u32);
 
     print!("\
 bcachefs format - create a new bcachefs filesystem on one or more devices
@@ -99,10 +96,10 @@ Report bugs to <linux-bcachefs@vger.kernel.org>
 
 /// Per-device configuration accumulated during parsing.
 struct DevConfig {
-    path: String,
-    label: Option<String>,
+    path:    String,
+    label:   Option<String>,
     fs_size: u64,
-    opts: c::bch_opts,
+    opts:    c::bch_opts,
 }
 
 /// Get the value for a long option, consuming the next argv entry if needed.
@@ -125,7 +122,12 @@ pub(crate) fn take_opt_value<'a>(
 
 /// Get the value for a short option, consuming the next argv entry if needed.
 /// If the arg has chars after the flag letter (e.g. "-Lfoo"), use those.
-pub(crate) fn take_short_value(arg: &str, argv: &[String], i: &mut usize, flag: char) -> Result<String> {
+pub(crate) fn take_short_value(
+    arg: &str,
+    argv: &[String],
+    i: &mut usize,
+    flag: char,
+) -> Result<String> {
     if arg.len() > 2 {
         Ok(arg[2..].to_string())
     } else {
@@ -185,10 +187,10 @@ fn parse_format_args(argv: Vec<String>) -> Result<FormatConfig> {
     macro_rules! push_device {
         ($path:expr) => {{
             devices.push(DevConfig {
-                path: $path,
-                label: cur_label.take(),
+                path:    $path,
+                label:   cur_label.take(),
                 fs_size: cur_fs_size,
-                opts: std::mem::take(&mut cur_dev_opts),
+                opts:    std::mem::take(&mut cur_dev_opts),
             });
             cur_fs_size = 0;
             unconsumed_dev_option = false;
@@ -259,8 +261,7 @@ fn parse_format_args(argv: Vec<String>) -> Result<FormatConfig> {
                 }
                 "encrypted" => encrypted = true,
                 "passphrase_file" => {
-                    passphrase_file =
-                        Some(take_opt_value(inline_val, &argv, &mut i, raw_name)?);
+                    passphrase_file = Some(take_opt_value(inline_val, &argv, &mut i, raw_name)?);
                 }
                 "no_passphrase" => no_passphrase = true,
                 "fs_label" => {
@@ -343,7 +344,9 @@ fn parse_format_args(argv: Vec<String>) -> Result<FormatConfig> {
 
     // Validations
     if unconsumed_dev_option {
-        bail!("Options for devices apply to subsequent devices; got a device option with no device");
+        bail!(
+            "Options for devices apply to subsequent devices; got a device option with no device"
+        );
     }
 
     if devices.is_empty() {
@@ -427,8 +430,16 @@ pub fn cmd_format(argv: Vec<String>) -> Result<()> {
     }
 
     // Build C format_opts
-    let label_cstr = cfg.fs_label.as_ref().map(|l| CString::new(l.as_str())).transpose()?;
-    let source_cstr = cfg.source.as_ref().map(|s| CString::new(s.as_str())).transpose()?;
+    let label_cstr = cfg
+        .fs_label
+        .as_ref()
+        .map(|l| CString::new(l.as_str()))
+        .transpose()?;
+    let source_cstr = cfg
+        .source
+        .as_ref()
+        .map(|s| CString::new(s.as_str()))
+        .transpose()?;
 
     let mut fmt_opts = c::format_opts {
         version,
@@ -458,14 +469,23 @@ pub fn cmd_format(argv: Vec<String>) -> Result<()> {
     }
 
     // Build C dev_opts — CStrings must outlive c_devices
-    let dev_cstrs: Vec<(CString, Option<CString>)> = cfg.devices.iter()
-        .map(|dev| Ok((
-            CString::new(dev.path.as_str())?,
-            dev.label.as_ref().map(|l| CString::new(l.as_str())).transpose()?,
-        )))
+    let dev_cstrs: Vec<(CString, Option<CString>)> = cfg
+        .devices
+        .iter()
+        .map(|dev| {
+            Ok((
+                CString::new(dev.path.as_str())?,
+                dev.label
+                    .as_ref()
+                    .map(|l| CString::new(l.as_str()))
+                    .transpose()?,
+            ))
+        })
         .collect::<Result<_>>()?;
 
-    let mut c_devices: Vec<c::dev_opts> = cfg.devices.iter()
+    let mut c_devices: Vec<c::dev_opts> = cfg
+        .devices
+        .iter()
         .zip(&dev_cstrs)
         .map(|(dev, (path_c, label_c))| {
             let mut c_dev = c::dev_opts {
@@ -486,15 +506,19 @@ pub fn cmd_format(argv: Vec<String>) -> Result<()> {
         let ret = unsafe { c::open_for_format(c_dev, 0, cfg.force) };
         if ret != 0 {
             let path = unsafe { CStr::from_ptr(c_dev.path) }.to_string_lossy();
-            bail!("Error opening {}: {}", path, io::Error::from_raw_os_error(-ret));
+            bail!(
+                "Error opening {}: {}",
+                path,
+                io::Error::from_raw_os_error(-ret)
+            );
         }
     }
 
     // Call bch2_format
     let dev_list = c::dev_opts_list {
-        nr: c_devices.len(),
-        size: c_devices.len(),
-        data: c_devices.as_mut_ptr(),
+        nr:           c_devices.len(),
+        size:         c_devices.len(),
+        data:         c_devices.as_mut_ptr(),
         preallocated: Default::default(),
     };
 

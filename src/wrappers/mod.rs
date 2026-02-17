@@ -15,7 +15,9 @@ pub struct SbLockGuard(*mut libc::pthread_mutex_t);
 
 impl Drop for SbLockGuard {
     fn drop(&mut self) {
-        unsafe { libc::pthread_mutex_unlock(self.0); }
+        unsafe {
+            libc::pthread_mutex_unlock(self.0);
+        }
     }
 }
 

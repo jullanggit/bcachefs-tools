@@ -57,10 +57,7 @@ pub extern "C" fn bch2_super_write(fd: i32, sb: *mut c::bch_sb) {
             // Patch the layout into the end of this block
             let layout_bytes = std::mem::size_of::<c::bch_sb_layout>();
             let src = unsafe {
-                std::slice::from_raw_parts(
-                    &sb_ref.layout as *const _ as *const u8,
-                    layout_bytes,
-                )
+                std::slice::from_raw_parts(&sb_ref.layout as *const _ as *const u8, layout_bytes)
             };
             buf[bs - layout_bytes..bs].copy_from_slice(src);
 
@@ -126,12 +123,10 @@ fn pwrite_exact(file: &std::fs::File, buf: &[u8], offset: u64) {
 }
 
 pub const BCACHE_MAGIC: [u8; 16] = [
-    0xc6, 0x85, 0x73, 0xf6, 0x4e, 0x1a, 0x45, 0xca,
-    0x82, 0x65, 0xf5, 0x7f, 0x48, 0xba, 0x6d, 0x81,
+    0xc6, 0x85, 0x73, 0xf6, 0x4e, 0x1a, 0x45, 0xca, 0x82, 0x65, 0xf5, 0x7f, 0x48, 0xba, 0x6d, 0x81,
 ];
 pub const BCHFS_MAGIC: [u8; 16] = [
-    0xc6, 0x85, 0x73, 0xf6, 0x66, 0xce, 0x90, 0xa9,
-    0xd9, 0x6a, 0x60, 0xcf, 0x80, 0x3d, 0xf7, 0xef,
+    0xc6, 0x85, 0x73, 0xf6, 0x66, 0xce, 0x90, 0xa9, 0xd9, 0x6a, 0x60, 0xcf, 0x80, 0x3d, 0xf7, 0xef,
 ];
 
 /// Default superblock size in 512-byte sectors
@@ -172,7 +167,8 @@ pub fn sb_layout_init(
     if sb_pos > sb_end {
         return Err(anyhow::anyhow!(
             "insufficient space for superblocks: need {} sectors but only {} available",
-            sb_pos - sb_start, sb_end - sb_start
+            sb_pos - sb_start,
+            sb_end - sb_start
         ));
     }
 

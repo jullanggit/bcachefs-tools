@@ -10,7 +10,9 @@ use bch_bindgen::sb::COUNTERS;
 use clap::Parser;
 
 fn match_counter(name: &str) -> Result<usize> {
-    COUNTERS.iter().position(|c| c.name == name)
+    COUNTERS
+        .iter()
+        .position(|c| c.name == name)
         .ok_or_else(|| anyhow!("invalid counter '{}'", name))
 }
 
@@ -29,7 +31,8 @@ pub fn cmd_reset_counters(argv: Vec<String>) -> Result<()> {
     let cli = Cli::parse_from(argv);
 
     let to_reset: Vec<usize> = if let Some(ref names) = cli.counters {
-        names.split(',')
+        names
+            .split(',')
             .map(|s| match_counter(s.trim()))
             .collect::<Result<Vec<_>>>()?
     } else {
@@ -44,10 +47,13 @@ pub fn cmd_reset_counters(argv: Vec<String>) -> Result<()> {
     // open fs in nostart mode
     let mut fs_opts = c::bch_opts::default();
     opt_set!(fs_opts, nostart, 1);
-    opt_set!(fs_opts, degraded, bch_degraded_actions::BCH_DEGRADED_very as u8);
+    opt_set!(
+        fs_opts,
+        degraded,
+        bch_degraded_actions::BCH_DEGRADED_very as u8
+    );
 
-    let fs = Fs::open(&devs, fs_opts)
-        .context("opening filesystem")?;
+    let fs = Fs::open(&devs, fs_opts).context("opening filesystem")?;
 
     unsafe {
         let now = (*fs.raw).counters.now;

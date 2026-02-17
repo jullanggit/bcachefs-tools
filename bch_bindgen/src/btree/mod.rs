@@ -1,6 +1,6 @@
 use crate::bkey::*;
 use crate::c;
-use crate::errcode::{BchError, bch_errcode, errptr_to_result_c};
+use crate::errcode::{bch_errcode, errptr_to_result_c, BchError};
 use crate::fs::Fs;
 use crate::printbuf_to_formatter;
 use crate::SPOS_MAX;
@@ -73,7 +73,7 @@ bitflags! {
 
 pub fn lockrestart_do<T, F>(trans: &BtreeTrans, mut f: F) -> Result<T, BchError>
 where
-    F: FnMut() -> Result<T, BchError>
+    F: FnMut() -> Result<T, BchError>,
 {
     loop {
         let restart_count = trans.begin();
@@ -126,7 +126,7 @@ impl<'t> BtreeIter<'t> {
                 std::mem::transmute::<u32, c::btree_id>(btree.into()),
                 pos,
                 c::btree_iter_update_trigger_flags(flags.bits),
-                0
+                0,
             );
 
             BtreeIter {
@@ -153,7 +153,7 @@ impl<'t> BtreeIter<'t> {
                 pos,
                 0,
                 level,
-                c::btree_iter_update_trigger_flags(flags.bits)
+                c::btree_iter_update_trigger_flags(flags.bits),
             );
 
             BtreeIter {
@@ -164,13 +164,14 @@ impl<'t> BtreeIter<'t> {
     }
 
     pub fn peek_max<'i>(&'i mut self, end: bpos) -> Result<Option<BkeySC<'i>>, BchError> {
-        unsafe {
-            bkey_s_c_to_result(c::bch2_btree_iter_peek_max(&mut self.raw, end))
-        }
+        unsafe { bkey_s_c_to_result(c::bch2_btree_iter_peek_max(&mut self.raw, end)) }
     }
 
-    pub fn peek_max_flags<'i>(&'i mut self, end: bpos, flags: BtreeIterFlags) ->
-            Result<Option<BkeySC<'i>>, BchError> {
+    pub fn peek_max_flags<'i>(
+        &'i mut self,
+        end: bpos,
+        flags: BtreeIterFlags,
+    ) -> Result<Option<BkeySC<'i>>, BchError> {
         unsafe {
             if flags.contains(BtreeIterFlags::SLOTS) {
                 if bkey_le(self.raw.pos, end) {
@@ -342,17 +343,18 @@ impl c::btree {
         unsafe { c::bch2_btree_node_iter_init_from_start(&mut node_iter, b) };
 
         loop {
-            let k = unsafe {
-                c::bch2_btree_node_iter_peek_unpack(&mut node_iter, b, &mut unpacked)
-            };
+            let k =
+                unsafe { c::bch2_btree_node_iter_peek_unpack(&mut node_iter, b, &mut unpacked) };
             if k.k.is_null() {
                 return ControlFlow::Continue(());
             }
             if f(BkeySC {
-                k: unsafe { &*k.k },
-                v: unsafe { &*k.v },
+                k:    unsafe { &*k.k },
+                v:    unsafe { &*k.v },
                 iter: PhantomData,
-            }).is_break() {
+            })
+            .is_break()
+            {
                 return ControlFlow::Break(());
             }
             unsafe { c::bch2_btree_node_iter_advance(&mut node_iter, b) };

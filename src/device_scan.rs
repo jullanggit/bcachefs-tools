@@ -22,23 +22,19 @@
 // via forget() + raw pointers — the C side is responsible for freeing.
 
 use std::{
-    ffi::{CStr, CString, c_char, c_int, OsString, OsStr},
     collections::HashMap,
+    ffi::{c_char, c_int, CStr, CString, OsStr, OsString},
     fs,
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
 };
 
 use anyhow::Result;
-use bch_bindgen::{bcachefs, opt_get, opt_set};
-use bcachefs::{
-    bch_sb_handle,
-    sb_name,
-    sb_names,
-};
 use bcachefs::bch_opts;
-use uuid::Uuid;
+use bcachefs::{bch_sb_handle, sb_name, sb_names};
+use bch_bindgen::{bcachefs, opt_get, opt_set};
 use log::debug;
+use uuid::Uuid;
 
 fn read_super_silent(path: impl AsRef<Path>, mut opts: bch_opts) -> anyhow::Result<bch_sb_handle> {
     opt_set!(opts, noexcl, 1);
@@ -50,10 +46,12 @@ fn read_super_silent(path: impl AsRef<Path>, mut opts: bch_opts) -> anyhow::Resu
 
 fn device_property_map(dev: &udev::Device) -> HashMap<String, String> {
     dev.properties()
-        .map(|i| (
-            i.name().to_string_lossy().into_owned(),
-            i.value().to_string_lossy().into_owned(),
-        ))
+        .map(|i| {
+            (
+                i.name().to_string_lossy().into_owned(),
+                i.value().to_string_lossy().into_owned(),
+            )
+        })
         .collect()
 }
 
@@ -70,10 +68,9 @@ fn get_devices_by_uuid_udev(uuid: Uuid) -> anyhow::Result<Vec<String>> {
         .scan_devices()?
         .filter(udev::Device::is_initialized)
         .map(|dev| device_property_map(&dev))
-        .filter(|m|
-            m.contains_key("ID_FS_UUID") &&
-            m["ID_FS_UUID"] == uuid &&
-            m.contains_key("DEVNAME"))
+        .filter(|m| {
+            m.contains_key("ID_FS_UUID") && m["ID_FS_UUID"] == uuid && m.contains_key("DEVNAME")
+        })
         .map(|m| m["DEVNAME"].clone())
         .collect::<Vec<_>>())
 }
@@ -95,7 +92,11 @@ fn get_all_block_devnodes() -> anyhow::Result<Vec<String>> {
     Ok(devices)
 }
 
-fn read_sbs_matching_uuid(uuid: Uuid, devices: &[String], opts: &bch_opts) -> Vec<(PathBuf, bch_sb_handle)> {
+fn read_sbs_matching_uuid(
+    uuid: Uuid,
+    devices: &[String],
+    opts: &bch_opts,
+) -> Vec<(PathBuf, bch_sb_handle)> {
     devices
         .iter()
         .filter_map(|dev| {
@@ -110,7 +111,7 @@ fn read_sbs_matching_uuid(uuid: Uuid, devices: &[String], opts: &bch_opts) -> Ve
 fn get_devices_by_uuid(
     uuid: Uuid,
     opts: &bch_opts,
-    use_udev: bool
+    use_udev: bool,
 ) -> anyhow::Result<Vec<(PathBuf, bch_sb_handle)>> {
     if use_udev {
         let devs_from_udev = get_devices_by_uuid_udev(uuid)?;
@@ -121,7 +122,8 @@ fn get_devices_by_uuid(
             // Check if udev found all expected devices. During early boot,
             // udev may not have finished processing all devices yet — if we
             // got fewer than expected, fall back to scanning all block devices.
-            let expected = sbs.first()
+            let expected = sbs
+                .first()
                 .map(|(_, sb)| sb.sb().number_of_devices() as usize)
                 .unwrap_or(0);
 
@@ -129,8 +131,12 @@ fn get_devices_by_uuid(
                 return Ok(sbs);
             }
 
-            debug!("udev found {}/{} devices for UUID {}, falling back to block scan",
-                sbs.len(), expected, uuid);
+            debug!(
+                "udev found {}/{} devices for UUID {}, falling back to block scan",
+                sbs.len(),
+                expected,
+                uuid
+            );
         }
     }
 
@@ -144,11 +150,14 @@ fn get_devices_by_uuid(
 fn devs_str_sbs_from_device(
     device: &Path,
     opts: &bch_opts,
-    use_udev: bool
+    use_udev: bool,
 ) -> anyhow::Result<Vec<(PathBuf, bch_sb_handle)>> {
     if let Ok(metadata) = fs::metadata(device) {
         if metadata.is_dir() {
-            return Err(anyhow::anyhow!("'{}' is a directory, not a block device", device.display()));
+            return Err(anyhow::anyhow!(
+                "'{}' is a directory, not a block device",
+                device.display()
+            ));
         }
     }
 
@@ -174,12 +183,13 @@ pub fn scan_sbs(device: &String, opts: &bch_opts) -> Result<Vec<(PathBuf, bch_sb
         // part of the FS. This appears to be the case when we get called during
         // fstab mount processing and the fstab specifies a UUID.
 
-        return device.split(':')
+        return device
+            .split(':')
             .map(PathBuf::from)
-            .map(|path|
-                 bch_bindgen::sb::io::read_super_opts(path.as_ref(), opts)
-                 .map(|sb| (path, sb)))
-            .collect::<Result<Vec<_>>>()
+            .map(|path| {
+                bch_bindgen::sb::io::read_super_opts(path.as_ref(), opts).map(|sb| (path, sb))
+            })
+            .collect::<Result<Vec<_>>>();
     }
 
     let udev = opt_get!(opts, mount_trusts_udev) != 0;
@@ -221,14 +231,17 @@ pub extern "C" fn bch2_scan_device_sbs(device: *const c_char, ret: *mut sb_names
         })
         .into_iter()
         .map(|(name, sb)| sb_name {
-            name: CString::new(name.into_os_string().into_vec()).unwrap().into_raw(),
-            sb } )
+            name: CString::new(name.into_os_string().into_vec())
+                .unwrap()
+                .into_raw(),
+            sb,
+        })
         .collect::<Vec<sb_name>>();
 
     unsafe {
-        (*ret).data   = sbs.as_mut_ptr();
-        (*ret).nr     = sbs.len();
-        (*ret).size   = sbs.capacity();
+        (*ret).data = sbs.as_mut_ptr();
+        (*ret).nr = sbs.len();
+        (*ret).size = sbs.capacity();
     }
     std::mem::forget(sbs);
     0

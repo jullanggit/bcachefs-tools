@@ -48,7 +48,9 @@ fn read_counters(fd: i32, flags: u16, nr_stable: u16) -> Result<Vec<u64>> {
 
     let actual_nr = unsafe { (*(buf.as_ptr() as *const bch_ioctl_query_counters)).nr } as usize;
     let data = unsafe { buf.as_ptr().add(hdr_size) as *const u64 };
-    Ok((0..actual_nr).map(|i| unsafe { std::ptr::read_unaligned(data.add(i)) }).collect())
+    Ok((0..actual_nr)
+        .map(|i| unsafe { std::ptr::read_unaligned(data.add(i)) })
+        .collect())
 }
 
 // Per-device IO from sysfs (io_done is JSON: {"read": {...}, "write": {...}}, values in bytes)
@@ -60,32 +62,40 @@ struct IoDone {
 }
 
 struct DevIoEntry {
-    label:      String,     // "dev/data_type"
-    read_bytes: u64,
+    label:       String, // "dev/data_type"
+    read_bytes:  u64,
     write_bytes: u64,
 }
 
 fn read_device_io(sysfs_path: &Path) -> Vec<DevIoEntry> {
     let mut entries = Vec::new();
-    let Ok(dir) = fs::read_dir(sysfs_path) else { return entries };
+    let Ok(dir) = fs::read_dir(sysfs_path) else {
+        return entries;
+    };
 
     for entry in dir.flatten() {
         let dirname = entry.file_name().to_string_lossy().into_owned();
-        if !dirname.starts_with("dev-") { continue }
+        if !dirname.starts_with("dev-") {
+            continue;
+        }
 
         let dev_path = entry.path();
         let dev_name = dev_name_from_sysfs(&dev_path);
 
         let io_done_path = dev_path.join("io_done");
-        let Ok(content) = fs::read_to_string(&io_done_path) else { continue };
-        let Ok(io_done) = serde_json::from_str::<IoDone>(&content) else { continue };
+        let Ok(content) = fs::read_to_string(&io_done_path) else {
+            continue;
+        };
+        let Ok(io_done) = serde_json::from_str::<IoDone>(&content) else {
+            continue;
+        };
 
         for (dtype, &r) in &io_done.read {
             let w = io_done.write.get(dtype).copied().unwrap_or(0);
             if r != 0 || w != 0 {
                 entries.push(DevIoEntry {
-                    label: format!("{}/{}", dev_name, dtype),
-                    read_bytes: r,
+                    label:       format!("{}/{}", dev_name, dtype),
+                    read_bytes:  r,
                     write_bytes: w,
                 });
             }
@@ -98,7 +108,11 @@ fn read_device_io(sysfs_path: &Path) -> Vec<DevIoEntry> {
 // Human-readable formatting
 
 fn fmt_bytes(bytes: u64, human_readable: bool) -> String {
-    if human_readable { fmt_bytes_human(bytes) } else { format!("{}", bytes) }
+    if human_readable {
+        fmt_bytes_human(bytes)
+    } else {
+        format!("{}", bytes)
+    }
 }
 
 fn fmt_counter(val: u64, sectors: bool, human_readable: bool) -> String {
@@ -136,7 +150,7 @@ struct TopState {
     mount_vals:     Vec<u64>,
     start_vals:     Vec<u64>,
     prev_vals:      Vec<u64>,
-    prev_dev_io:    HashMap<String, (u64, u64)>,    // label -> (read, write)
+    prev_dev_io:    HashMap<String, (u64, u64)>, // label -> (read, write)
     human_readable: bool,
     show_devices:   bool,
     sysfs_path:     PathBuf,
@@ -150,33 +164,60 @@ impl TopState {
 
         let mount_vals = read_counters(ioctl_fd, BCH_IOCTL_QUERY_COUNTERS_MOUNT, nr_stable)?;
         let start_vals = read_counters(ioctl_fd, 0, nr_stable)?;
-        let prev_vals  = read_counters(ioctl_fd, 0, nr_stable)?;
+        let prev_vals = read_counters(ioctl_fd, 0, nr_stable)?;
 
         let sysfs_path = sysfs_path_from_fd(handle.sysfs_fd())?;
 
         Ok(TopState {
-            ioctl_fd, nr_stable,
-            mount_vals, start_vals, prev_vals,
+            ioctl_fd,
+            nr_stable,
+            mount_vals,
+            start_vals,
+            prev_vals,
             prev_dev_io: HashMap::new(),
-            human_readable, show_devices: true,
-            sysfs_path, interval_secs: 1,
+            human_readable,
+            show_devices: true,
+            sysfs_path,
+            interval_secs: 1,
         })
     }
 
     fn get_val(vals: &[u64], stable_id: u16) -> u64 {
         let idx = stable_id as usize;
-        if idx < vals.len() { vals[idx] } else { 0 }
+        if idx < vals.len() {
+            vals[idx]
+        } else {
+            0
+        }
     }
 
-    fn render(&self, curr: &[u64], dev_io: &[DevIoEntry], stdout: &mut io::Stdout) -> io::Result<()> {
-        execute!(stdout, cursor::MoveTo(0, 0), terminal::Clear(ClearType::All))?;
+    fn render(
+        &self,
+        curr: &[u64],
+        dev_io: &[DevIoEntry],
+        stdout: &mut io::Stdout,
+    ) -> io::Result<()> {
+        execute!(
+            stdout,
+            cursor::MoveTo(0, 0),
+            terminal::Clear(ClearType::All)
+        )?;
 
         write!(stdout, "All counters have a corresponding tracepoint; for more info on any given event, try e.g.\r\n")?;
         write!(stdout, "  perf trace -e bcachefs:data_update_pred\r\n\r\n")?;
-        write!(stdout, "  q:quit  h:human-readable  d:devices  1-9:interval\r\n\r\n")?;
+        write!(
+            stdout,
+            "  q:quit  h:human-readable  d:devices  1-9:interval\r\n\r\n"
+        )?;
 
-        write!(stdout, "{:<40} {:>14} {:>14} {:>14}\r\n",
-            "", format!("{}/s", self.interval_secs), "total", "mount")?;
+        write!(
+            stdout,
+            "{:<40} {:>14} {:>14} {:>14}\r\n",
+            "",
+            format!("{}/s", self.interval_secs),
+            "total",
+            "mount"
+        )?;
 
         for c in COUNTERS {
             let cv = Self::get_val(curr, c.stable_id);
@@ -185,24 +226,37 @@ impl TopState {
             let mv = Self::get_val(&self.mount_vals, c.stable_id);
 
             let v_mount = cv.wrapping_sub(mv);
-            if v_mount == 0 { continue }
+            if v_mount == 0 {
+                continue;
+            }
 
-            let v_rate  = cv.wrapping_sub(pv);
+            let v_rate = cv.wrapping_sub(pv);
             let v_total = cv.wrapping_sub(sv);
 
-            write!(stdout, "{:<40} {:>12}/s {:>14} {:>14}\r\n",
+            write!(
+                stdout,
+                "{:<40} {:>12}/s {:>14} {:>14}\r\n",
                 c.name,
-                fmt_counter(v_rate / self.interval_secs as u64, c.is_sectors, self.human_readable),
+                fmt_counter(
+                    v_rate / self.interval_secs as u64,
+                    c.is_sectors,
+                    self.human_readable
+                ),
                 fmt_counter(v_total, c.is_sectors, self.human_readable),
-                fmt_counter(v_mount, c.is_sectors, self.human_readable))?;
+                fmt_counter(v_mount, c.is_sectors, self.human_readable)
+            )?;
         }
 
         if self.show_devices && !dev_io.is_empty() {
             write!(stdout, "\r\nPer-device IO:\r\n")?;
-            write!(stdout, "{:<40} {:>14} {:>14} {:>14} {:>14}\r\n",
-                "", "read/s", "read", "write/s", "write")?;
+            write!(
+                stdout,
+                "{:<40} {:>14} {:>14} {:>14} {:>14}\r\n",
+                "", "read/s", "read", "write/s", "write"
+            )?;
             for dev in dev_io {
-                let (prev_r, prev_w) = self.prev_dev_io
+                let (prev_r, prev_w) = self
+                    .prev_dev_io
                     .get(&dev.label)
                     .copied()
                     .unwrap_or((dev.read_bytes, dev.write_bytes));
@@ -210,10 +264,15 @@ impl TopState {
                 let rate_w = dev.write_bytes.wrapping_sub(prev_w) / self.interval_secs as u64;
 
                 let h = self.human_readable;
-                write!(stdout, "{:<40} {:>14} {:>14} {:>14} {:>14}\r\n",
+                write!(
+                    stdout,
+                    "{:<40} {:>14} {:>14} {:>14} {:>14}\r\n",
                     &dev.label,
-                    fmt_bytes(rate_r, h), fmt_bytes(dev.read_bytes, h),
-                    fmt_bytes(rate_w, h), fmt_bytes(dev.write_bytes, h))?;
+                    fmt_bytes(rate_r, h),
+                    fmt_bytes(dev.read_bytes, h),
+                    fmt_bytes(rate_w, h),
+                    fmt_bytes(dev.write_bytes, h)
+                )?;
             }
         }
 
@@ -229,7 +288,8 @@ fn run_interactive(handle: BcachefsHandle, human_readable: bool) -> Result<()> {
         let dev_io = read_device_io(&state.sysfs_path);
         state.render(&curr, &dev_io, stdout)?;
         state.prev_vals = curr;
-        state.prev_dev_io = dev_io.into_iter()
+        state.prev_dev_io = dev_io
+            .into_iter()
             .map(|d| (d.label, (d.read_bytes, d.write_bytes)))
             .collect();
 
@@ -237,7 +297,9 @@ fn run_interactive(handle: BcachefsHandle, human_readable: bool) -> Result<()> {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(())
+                    }
                     KeyCode::Char('h') => state.human_readable = !state.human_readable,
                     KeyCode::Char('d') => state.show_devices = !state.show_devices,
                     KeyCode::Char(c @ '1'..='9') => {
@@ -246,7 +308,9 @@ fn run_interactive(handle: BcachefsHandle, human_readable: bool) -> Result<()> {
                     _ => {}
                 }
             }
-            while event::poll(Duration::ZERO)? { let _ = event::read()?; }
+            while event::poll(Duration::ZERO)? {
+                let _ = event::read()?;
+            }
         }
     })
 }
@@ -255,8 +319,8 @@ pub fn top(argv: Vec<String>) -> Result<()> {
     let cli = Cli::parse_from(argv);
 
     let fs_arg = cli.filesystem.as_deref().unwrap_or(".");
-    let handle = BcachefsHandle::open(fs_arg)
-        .with_context(|| format!("opening filesystem '{}'", fs_arg))?;
+    let handle =
+        BcachefsHandle::open(fs_arg).with_context(|| format!("opening filesystem '{}'", fs_arg))?;
 
     run_interactive(handle, cli.human_readable)
 }

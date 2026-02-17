@@ -22,7 +22,10 @@ use bch_bindgen::printbuf::Printbuf;
 
 /// Print superblock information to stdout
 #[derive(Parser, Debug)]
-#[command(about = "Print superblock information to stdout", disable_help_flag = true)]
+#[command(
+    about = "Print superblock information to stdout",
+    disable_help_flag = true
+)]
 pub struct ShowSuperCli {
     /// Print help
     #[arg(long = "help", action = clap::ArgAction::Help)]
@@ -57,9 +60,7 @@ pub fn cmd_show_super(argv: Vec<String>) -> Result<()> {
             fields = !0;
         } else {
             let c_str = CString::new(f.as_str())?;
-            let v = unsafe {
-                c::bch2_read_flag_list(c_str.as_ptr(), c::bch2_sb_fields.as_ptr())
-            };
+            let v = unsafe { c::bch2_read_flag_list(c_str.as_ptr(), c::bch2_sb_fields.as_ptr()) };
             if v == u64::MAX {
                 return Err(anyhow!("invalid superblock field: {}", f));
             }
@@ -70,9 +71,7 @@ pub fn cmd_show_super(argv: Vec<String>) -> Result<()> {
 
     if let Some(ref f) = cli.field_only {
         let c_str = CString::new(f.as_str())?;
-        let v = unsafe {
-            c::match_string(c::bch2_sb_fields.as_ptr(), usize::MAX, c_str.as_ptr())
-        };
+        let v = unsafe { c::match_string(c::bch2_sb_fields.as_ptr(), usize::MAX, c_str.as_ptr()) };
         if v < 0 {
             return Err(anyhow!("invalid superblock field: {}", f));
         }

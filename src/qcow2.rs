@@ -93,19 +93,19 @@ const QCOW_OFLAG_COPIED: u64 = 1 << 63;
 
 #[repr(C)]
 struct Qcow2Hdr {
-    magic:                  u32,
-    version:                u32,
-    backing_file_offset:    u64,
-    backing_file_size:      u32,
-    block_bits:             u32,
-    size:                   u64,
-    crypt_method:           u32,
-    l1_size:                u32,
-    l1_table_offset:        u64,
-    refcount_table_offset:  u64,
-    refcount_table_blocks:  u32,
-    nb_snapshots:           u32,
-    snapshots_offset:       u64,
+    magic:                 u32,
+    version:               u32,
+    backing_file_offset:   u64,
+    backing_file_size:     u32,
+    block_bits:            u32,
+    size:                  u64,
+    crypt_method:          u32,
+    l1_size:               u32,
+    l1_table_offset:       u64,
+    refcount_table_offset: u64,
+    refcount_table_blocks: u32,
+    nb_snapshots:          u32,
+    snapshots_offset:      u64,
 }
 
 // ---- Qcow2Image ----
@@ -134,10 +134,10 @@ impl Qcow2Image {
             outfd,
             image_size,
             block_size,
-            l1_table:   vec![0u64; l1_size],
-            l1_index:   None,
-            l2_table:   vec![0u64; l2_size as usize],
-            offset:     round_up(std::mem::size_of::<Qcow2Hdr>() as u64, block_size as u64),
+            l1_table: vec![0u64; l1_size],
+            l1_index: None,
+            l2_table: vec![0u64; l2_size as usize],
+            offset: round_up(std::mem::size_of::<Qcow2Hdr>() as u64, block_size as u64),
         })
     }
 
@@ -225,27 +225,25 @@ impl Qcow2Image {
 
         // Write L1 table (big-endian)
         let l1_offset = self.offset;
-        let l1_bytes: Vec<u8> = self.l1_table.iter()
-            .flat_map(|v| v.to_be_bytes())
-            .collect();
+        let l1_bytes: Vec<u8> = self.l1_table.iter().flat_map(|v| v.to_be_bytes()).collect();
         self.offset += round_up(l1_bytes.len() as u64, self.block_size as u64);
         pwrite_all(self.outfd, &l1_bytes, l1_offset)?;
 
         // Write header
         let hdr = Qcow2Hdr {
-            magic:                  QCOW_MAGIC.to_be(),
-            version:                QCOW_VERSION.to_be(),
-            backing_file_offset:    0,
-            backing_file_size:      0,
-            block_bits:             self.block_size.trailing_zeros().to_be(),
-            size:                   self.image_size.to_be(),
-            crypt_method:           0,
-            l1_size:                (self.l1_table.len() as u32).to_be(),
-            l1_table_offset:        l1_offset.to_be(),
-            refcount_table_offset:  0,
-            refcount_table_blocks:  0,
-            nb_snapshots:           0,
-            snapshots_offset:       0,
+            magic:                 QCOW_MAGIC.to_be(),
+            version:               QCOW_VERSION.to_be(),
+            backing_file_offset:   0,
+            backing_file_size:     0,
+            block_bits:            self.block_size.trailing_zeros().to_be(),
+            size:                  self.image_size.to_be(),
+            crypt_method:          0,
+            l1_size:               (self.l1_table.len() as u32).to_be(),
+            l1_table_offset:       l1_offset.to_be(),
+            refcount_table_offset: 0,
+            refcount_table_blocks: 0,
+            nb_snapshots:          0,
+            snapshots_offset:      0,
         };
 
         let mut header_buf = vec![0u8; self.block_size as usize];
@@ -304,9 +302,7 @@ pub fn qcow2_to_raw(infd: RawFd, outfd: RawFd) -> Result<()> {
         pread_exact(infd, &mut l2_buf, l1_entry & !QCOW_OFLAG_COPIED)?;
 
         for j in 0..l2_size {
-            let l2_entry = u64::from_be_bytes(
-                l2_buf[j * 8..(j + 1) * 8].try_into().unwrap(),
-            );
+            let l2_entry = u64::from_be_bytes(l2_buf[j * 8..(j + 1) * 8].try_into().unwrap());
             let src_offset = l2_entry & !QCOW_OFLAG_COPIED;
             if src_offset == 0 {
                 continue;

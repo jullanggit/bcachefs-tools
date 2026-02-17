@@ -26,7 +26,11 @@ impl<'a> BkeySC<'a> {
 
     pub fn to_text<'f>(&self, fs: &'f Fs) -> BkeySCToText<'a, 'f> {
         BkeySCToText {
-            k: BkeySC { k: self.k, v: self.v, iter: PhantomData },
+            k: BkeySC {
+                k:    self.k,
+                v:    self.v,
+                iter: PhantomData,
+            },
             fs,
         }
     }
@@ -108,11 +112,23 @@ pub fn bpos_ge(l: Bpos, r: Bpos) -> bool {
 #[inline(always)]
 pub fn bpos_cmp(l: Bpos, r: Bpos) -> i32 {
     if l.inode != r.inode {
-        if l.inode < r.inode { -1 } else { 1 }
+        if l.inode < r.inode {
+            -1
+        } else {
+            1
+        }
     } else if l.offset != r.offset {
-        if l.offset < r.offset { -1 } else { 1 }
+        if l.offset < r.offset {
+            -1
+        } else {
+            1
+        }
     } else if l.snapshot != r.snapshot {
-        if l.snapshot < r.snapshot { -1 } else { 1 }
+        if l.snapshot < r.snapshot {
+            -1
+        } else {
+            1
+        }
     } else {
         0
     }
@@ -120,12 +136,20 @@ pub fn bpos_cmp(l: Bpos, r: Bpos) -> i32 {
 
 #[inline]
 pub fn bpos_min(l: Bpos, r: Bpos) -> Bpos {
-    if bpos_lt(l, r) { l } else { r }
+    if bpos_lt(l, r) {
+        l
+    } else {
+        r
+    }
 }
 
 #[inline]
 pub fn bpos_max(l: Bpos, r: Bpos) -> Bpos {
-    if bpos_gt(l, r) { l } else { r }
+    if bpos_gt(l, r) {
+        l
+    } else {
+        r
+    }
 }
 
 #[inline(always)]
@@ -164,9 +188,17 @@ pub fn bkey_ge(l: Bpos, r: Bpos) -> bool {
 #[inline(always)]
 pub fn bkey_cmp(l: Bpos, r: Bpos) -> i32 {
     if l.inode != r.inode {
-        if l.inode < r.inode { -1 } else { 1 }
+        if l.inode < r.inode {
+            -1
+        } else {
+            1
+        }
     } else if l.offset != r.offset {
-        if l.offset < r.offset { -1 } else { 1 }
+        if l.offset < r.offset {
+            -1
+        } else {
+            1
+        }
     } else {
         0
     }
@@ -175,8 +207,8 @@ pub fn bkey_cmp(l: Bpos, r: Bpos) -> i32 {
 /// Start position of a bkey (p.offset - size).
 pub fn bkey_start_pos(k: &c::bkey) -> c::bpos {
     c::bpos {
-        inode: k.p.inode,
-        offset: k.p.offset.wrapping_sub(k.size as u64),
+        inode:    k.p.inode,
+        offset:   k.p.offset.wrapping_sub(k.size as u64),
         snapshot: k.p.snapshot,
     }
 }

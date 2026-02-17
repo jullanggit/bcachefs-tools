@@ -1,17 +1,17 @@
-use std::fs::File;
-use std::os::unix::fs::FileExt;
-use std::os::unix::io::AsRawFd;
-use std::path::Path;
 use anyhow::{anyhow, bail, Result};
 use bch_bindgen::bcachefs;
 use bch_bindgen::c;
 use bch_bindgen::opt_set;
 use bch_bindgen::sb::io as sb_io;
 use clap::Parser;
+use std::fs::File;
+use std::os::unix::fs::FileExt;
+use std::os::unix::io::AsRawFd;
+use std::path::Path;
 
 use crate::util::{file_size, parse_human_size};
-use bch_bindgen::printbuf::Printbuf;
 use crate::wrappers::super_io::{self, BCACHE_MAGIC, BCHFS_MAGIC, SUPERBLOCK_SIZE_DEFAULT};
+use bch_bindgen::printbuf::Printbuf;
 
 // bch2_sb_validate's flags parameter is a bch_validate_flags enum in bindgen,
 // but C passes 0 (no flags). Since 0 isn't a valid Rust enum variant, declare
@@ -132,7 +132,9 @@ fn probe_sb_range(dev: &File, start: u64, end: u64, verbose: bool) -> Vec<Vec<u8
     let buflen = (end - start) as usize;
     let mut buf = vec![0u8; buflen];
 
-    let Ok(r) = dev.read_at(&mut buf, start) else { return Vec::new() };
+    let Ok(r) = dev.read_at(&mut buf, start) else {
+        return Vec::new();
+    };
     if r < buflen {
         return Vec::new();
     }
@@ -150,7 +152,11 @@ fn probe_sb_range(dev: &File, start: u64, end: u64, verbose: bool) -> Vec<Vec<u8
 
         let bytes = super_io::vstruct_bytes_sb(sb);
         if offset + bytes > buflen {
-            eprintln!("found sb {} size {} that overran buffer", start + offset as u64, bytes);
+            eprintln!(
+                "found sb {} size {} that overran buffer",
+                start + offset as u64,
+                bytes
+            );
             offset += 512;
             continue;
         }
@@ -158,7 +164,11 @@ fn probe_sb_range(dev: &File, start: u64, end: u64, verbose: bool) -> Vec<Vec<u8
         let sb = unsafe { buf_as_sb_mut(&mut buf[offset..]) };
         let (ret, err) = validate_sb(sb, (start + offset as u64) >> 9);
         if ret != 0 {
-            eprintln!("found sb {} that failed to validate: {}", start + offset as u64, err);
+            eprintln!(
+                "found sb {} that failed to validate: {}",
+                start + offset as u64,
+                err
+            );
             offset += 512;
             continue;
         }
@@ -183,7 +193,8 @@ fn recover_from_scan(
 ) -> Result<Vec<u8>> {
     let mut sbs = if offset != 0 {
         probe_one_super(dev, SUPERBLOCK_SIZE_DEFAULT as usize * 512, offset, verbose)
-            .into_iter().collect()
+            .into_iter()
+            .collect()
     } else {
         let mut v = probe_sb_range(dev, 4096, scan_len, verbose);
         v.extend(probe_sb_range(dev, dev_size - scan_len, dev_size, verbose));
@@ -209,13 +220,19 @@ fn recover_from_member(src_device: &str, dev_idx: i32, dev_size: u64) -> Result<
 
     let nr_devices = unsafe { (*src_sb.sb).nr_devices } as i32;
     if dev_idx < 0 || dev_idx >= nr_devices {
-        return Err(anyhow!("Device index {} out of range (filesystem has {} devices)",
-                           dev_idx, nr_devices));
+        return Err(anyhow!(
+            "Device index {} out of range (filesystem has {} devices)",
+            dev_idx,
+            nr_devices
+        ));
     }
 
     let m = unsafe { c::bch2_sb_member_get(src_sb.sb, dev_idx) };
     if m.uuid.b == [0u8; 16] {
-        return Err(anyhow!("Member {} does not exist in source superblock", dev_idx));
+        return Err(anyhow!(
+            "Member {} does not exist in source superblock",
+            dev_idx
+        ));
     }
 
     unsafe {
@@ -242,9 +259,7 @@ fn recover_from_member(src_device: &str, dev_idx: i32, dev_size: u64) -> Result<
 
     // Copy to owned buffer; src_sb's Drop will free the C allocation
     let bytes = super_io::vstruct_bytes_sb(src_sb.sb());
-    let sb_buf = unsafe {
-        std::slice::from_raw_parts(src_sb.sb as *const u8, bytes).to_vec()
-    };
+    let sb_buf = unsafe { std::slice::from_raw_parts(src_sb.sb as *const u8, bytes).to_vec() };
 
     Ok(sb_buf)
 }
@@ -276,7 +291,8 @@ pub fn cmd_recover_super(argv: Vec<String>) -> Result<()> {
     };
 
     let dev_file = std::fs::OpenOptions::new()
-        .read(true).write(true)
+        .read(true)
+        .write(true)
         .open(&cli.device)
         .map_err(|e| anyhow!("{}: {}", cli.device, e))?;
 
@@ -309,10 +325,9 @@ pub fn cmd_recover_super(argv: Vec<String>) -> Result<()> {
     }
 
     if cli.yes || unsafe { c::ask_yn() } {
-        crate::wrappers::super_io::bch2_super_write(
-            dev_file.as_raw_fd(),
-            unsafe { buf_as_sb_mut(&mut sb_buf) },
-        );
+        crate::wrappers::super_io::bch2_super_write(dev_file.as_raw_fd(), unsafe {
+            buf_as_sb_mut(&mut sb_buf)
+        });
     }
 
     let _ = std::process::Command::new("udevadm")

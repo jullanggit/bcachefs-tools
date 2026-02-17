@@ -46,8 +46,8 @@ pub fn jset_no_flush(jset: &c::jset) -> bool {
 
 /// Iterator over jset_entry references within a jset.
 pub struct JsetEntryIter<'a> {
-    cur: *const c::jset_entry,
-    end: *const c::jset_entry,
+    cur:      *const c::jset_entry,
+    end:      *const c::jset_entry,
     _phantom: PhantomData<&'a c::jset>,
 }
 
@@ -70,13 +70,17 @@ impl<'a> Iterator for JsetEntryIter<'a> {
 pub fn jset_entries(jset: &c::jset) -> JsetEntryIter<'_> {
     let start = jset.start.as_ptr();
     let end = unsafe { vstruct_last_jset(jset as *const c::jset) };
-    JsetEntryIter { cur: start, end, _phantom: PhantomData }
+    JsetEntryIter {
+        cur: start,
+        end,
+        _phantom: PhantomData,
+    }
 }
 
 /// Iterator over bkey_i references within a jset_entry.
 pub struct JsetEntryKeyIter<'a> {
-    cur: *const c::bkey_i,
-    end: *const c::bkey_i,
+    cur:      *const c::bkey_i,
+    end:      *const c::bkey_i,
     _phantom: PhantomData<&'a c::jset_entry>,
 }
 
@@ -102,7 +106,11 @@ impl<'a> Iterator for JsetEntryKeyIter<'a> {
 pub fn jset_entry_keys(entry: &c::jset_entry) -> JsetEntryKeyIter<'_> {
     let start = entry.start.as_ptr();
     let end = unsafe { vstruct_next_entry(entry as *const c::jset_entry) as *const c::bkey_i };
-    JsetEntryKeyIter { cur: start, end, _phantom: PhantomData }
+    JsetEntryKeyIter {
+        cur: start,
+        end,
+        _phantom: PhantomData,
+    }
 }
 
 // ---- entry type conversion ----

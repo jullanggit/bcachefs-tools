@@ -12,7 +12,7 @@ pub struct Printbuf(c::printbuf);
 /// RAII guard for printbuf indentation — calls `indent_sub` on drop.
 /// Use through `Printbuf::indent()`.
 pub struct PrintbufIndent<'a> {
-    buf: &'a mut Printbuf,
+    buf:    &'a mut Printbuf,
     spaces: u32,
 }
 
@@ -24,11 +24,15 @@ impl Drop for PrintbufIndent<'_> {
 
 impl Deref for PrintbufIndent<'_> {
     type Target = Printbuf;
-    fn deref(&self) -> &Printbuf { self.buf }
+    fn deref(&self) -> &Printbuf {
+        self.buf
+    }
 }
 
 impl DerefMut for PrintbufIndent<'_> {
-    fn deref_mut(&mut self) -> &mut Printbuf { self.buf }
+    fn deref_mut(&mut self) -> &mut Printbuf {
+        self.buf
+    }
 }
 
 impl Printbuf {
@@ -40,9 +44,7 @@ impl Printbuf {
         if self.0.buf.is_null() {
             ""
         } else {
-            unsafe { CStr::from_ptr(self.0.buf) }
-                .to_str()
-                .unwrap_or("")
+            unsafe { CStr::from_ptr(self.0.buf) }.to_str().unwrap_or("")
         }
     }
 
@@ -124,15 +126,25 @@ impl Printbuf {
     pub fn version(&mut self, v: u32) {
         // bch2_version_to_text takes an enum bcachefs_metadata_version,
         // which is #[repr(u32)]. We transmute from u32.
-        unsafe { c::bch2_version_to_text(&mut self.0, std::mem::transmute::<u32, c::bcachefs_metadata_version>(v)) };
+        unsafe {
+            c::bch2_version_to_text(
+                &mut self.0,
+                std::mem::transmute::<u32, c::bcachefs_metadata_version>(v),
+            )
+        };
     }
 
     /// Print superblock contents.
     ///
     /// # Safety
     /// `fs` must be a valid pointer to a `bch_fs` or null.
-    pub unsafe fn sb_to_text(&mut self, fs: *mut c::bch_fs, sb: &c::bch_sb,
-                             layout: bool, fields: u32) {
+    pub unsafe fn sb_to_text(
+        &mut self,
+        fs: *mut c::bch_fs,
+        sb: &c::bch_sb,
+        layout: bool,
+        fields: u32,
+    ) {
         c::bch2_sb_to_text(&mut self.0, fs, sb as *const _ as *mut _, layout, fields);
     }
 
@@ -140,9 +152,22 @@ impl Printbuf {
     ///
     /// # Safety
     /// `fs` must be a valid pointer to a `bch_fs` or null.
-    pub unsafe fn sb_to_text_with_names(&mut self, fs: *mut c::bch_fs, sb: &c::bch_sb,
-                                        layout: bool, fields: u32, field_only: i32) {
-        c::bch2_sb_to_text_with_names(&mut self.0, fs, sb as *const _ as *mut _, layout, fields, field_only);
+    pub unsafe fn sb_to_text_with_names(
+        &mut self,
+        fs: *mut c::bch_fs,
+        sb: &c::bch_sb,
+        layout: bool,
+        fields: u32,
+        field_only: i32,
+    ) {
+        c::bch2_sb_to_text_with_names(
+            &mut self.0,
+            fs,
+            sb as *const _ as *mut _,
+            layout,
+            fields,
+            field_only,
+        );
     }
 
     /// Print a set of bitflags as comma-separated names.
@@ -173,7 +198,9 @@ impl fmt::Write for Printbuf {
 }
 
 impl Default for Printbuf {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl fmt::Display for Printbuf {

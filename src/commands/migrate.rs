@@ -1,4 +1,4 @@
-use std::ffi::{CString, c_char};
+use std::ffi::{c_char, CString};
 use std::process;
 
 use anyhow::{anyhow, bail, Result};
@@ -19,14 +19,12 @@ extern "C" {
         force: bool,
     ) -> i32;
 
-    fn rust_migrate_superblock(
-        dev_path: *const c_char,
-        sb_offset: u64,
-    ) -> i32;
+    fn rust_migrate_superblock(dev_path: *const c_char, sb_offset: u64) -> i32;
 }
 
 fn migrate_usage() {
-    print!("\
+    print!(
+        "\
 bcachefs migrate - migrate an existing filesystem to bcachefs
 Usage: bcachefs migrate [OPTION]...
 
@@ -38,7 +36,8 @@ Options:
   -h, --help                   Display this help and exit
 
 Report bugs to <linux-bcachefs@vger.kernel.org>
-");
+"
+    );
 }
 
 pub fn cmd_migrate(argv: Vec<String>) -> Result<()> {
@@ -152,15 +151,8 @@ pub fn cmd_migrate(argv: Vec<String>) -> Result<()> {
         unsafe { fs_opt_strs.__bindgen_anon_1.by_id[id] = ptr };
     }
 
-    let ret = unsafe {
-        rust_migrate_fs(
-            fs_path_cstr.as_ptr(),
-            fs_opt_strs,
-            fs_opts,
-            fmt_opts,
-            force,
-        )
-    };
+    let ret =
+        unsafe { rust_migrate_fs(fs_path_cstr.as_ptr(), fs_opt_strs, fs_opts, fmt_opts, force) };
 
     unsafe { c::bch2_opt_strs_free(&mut fs_opt_strs) };
 
@@ -189,9 +181,7 @@ pub fn cmd_migrate_superblock(argv: Vec<String>) -> Result<()> {
 
     let dev_cstr = CString::new(cli.device.as_str())?;
 
-    let ret = unsafe {
-        rust_migrate_superblock(dev_cstr.as_ptr(), cli.offset)
-    };
+    let ret = unsafe { rust_migrate_superblock(dev_cstr.as_ptr(), cli.offset) };
 
     if ret != 0 {
         process::exit(ret);

@@ -15,8 +15,12 @@ pub use crate::c::bch_errcode;
 pub struct BchError(i32);
 
 impl BchError {
-    pub fn from_raw(code: i32) -> Self { Self(code) }
-    pub fn raw(&self) -> i32 { self.0 }
+    pub fn from_raw(code: i32) -> Self {
+        Self(code)
+    }
+    pub fn raw(&self) -> i32 {
+        self.0
+    }
 
     pub fn matches(&self, class: bch_errcode) -> bool {
         if self.0 != 0 {

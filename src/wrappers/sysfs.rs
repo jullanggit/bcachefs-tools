@@ -18,7 +18,8 @@ pub fn dev_name_from_sysfs(dev_sysfs_path: &Path) -> String {
             return name.to_string_lossy().into_owned();
         }
     }
-    dev_sysfs_path.file_name()
+    dev_sysfs_path
+        .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
@@ -33,9 +34,9 @@ pub fn sysfs_path_from_fd(fd: BorrowedFd) -> Result<PathBuf> {
 /// Read a sysfs attribute as a u64.
 pub fn read_sysfs_u64(path: &Path) -> io::Result<u64> {
     let s = fs::read_to_string(path)?;
-    s.trim().parse::<u64>()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData,
-            format!("{}: {:?}", e, s.trim())))
+    s.trim()
+        .parse::<u64>()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {:?}", e, s.trim())))
 }
 
 /// Read a sysfs attribute as a string, relative to a directory fd.
@@ -48,7 +49,6 @@ pub fn read_sysfs_fd_str(dirfd: BorrowedFd, path: &str) -> io::Result<String> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     Ok(s.trim().to_string())
 }
-
 
 const KERNEL_VERSION_PATH: &str = "/sys/module/bcachefs/parameters/version";
 
@@ -64,12 +64,18 @@ pub fn bcachefs_kernel_version() -> u64 {
 /// devices, st_dev+st_ino for files) against each mount's device path(s).
 /// bcachefs mounts list multiple devices separated by colons.
 pub fn dev_mounted(path: &str) -> bool {
-    let Ok(d1) = fs::metadata(path) else { return false };
+    let Ok(d1) = fs::metadata(path) else {
+        return false;
+    };
 
-    let Ok(f) = fs::File::open("/proc/mounts") else { return false };
+    let Ok(f) = fs::File::open("/proc/mounts") else {
+        return false;
+    };
     for line in io::BufReader::new(f).lines() {
         let Ok(line) = line else { continue };
-        let Some(dev_field) = line.split_whitespace().next() else { continue };
+        let Some(dev_field) = line.split_whitespace().next() else {
+            continue;
+        };
 
         for dev in dev_field.split(':') {
             let Ok(d2) = fs::metadata(dev) else { continue };
@@ -134,10 +140,14 @@ pub fn fs_get_devices(sysfs_path: &Path) -> Result<Vec<DevInfo>> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        let durability = read_sysfs_u64(&dev_path.join("durability"))
-            .unwrap_or(1) as u32;
+        let durability = read_sysfs_u64(&dev_path.join("durability")).unwrap_or(1) as u32;
 
-        devs.push(DevInfo { idx, dev, label, durability });
+        devs.push(DevInfo {
+            idx,
+            dev,
+            label,
+            durability,
+        });
     }
     devs.sort_by_key(|d| d.idx);
     Ok(devs)

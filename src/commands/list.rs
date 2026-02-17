@@ -7,9 +7,9 @@ use bch_bindgen::btree::BtreeIter;
 use bch_bindgen::btree::BtreeIterFlags;
 use bch_bindgen::btree::BtreeNodeIter;
 use bch_bindgen::btree::BtreeTrans;
+use bch_bindgen::c::bch_degraded_actions;
 use bch_bindgen::fs::Fs;
 use bch_bindgen::opt_set;
-use bch_bindgen::c::bch_degraded_actions;
 use clap::Parser;
 use std::io::{stdout, IsTerminal};
 
@@ -24,13 +24,7 @@ fn list_keys(fs: &Fs, opt: &Cli) -> anyhow::Result<()> {
         flags |= BtreeIterFlags::ALL_SNAPSHOTS;
     }
 
-    let mut iter = BtreeIter::new_level(
-        &trans,
-        opt.btree,
-        opt.start,
-        opt.level,
-        flags,
-    );
+    let mut iter = BtreeIter::new_level(&trans, opt.btree, opt.start, opt.level, flags);
 
     iter.for_each(&trans, |k| {
         if k.k.p > opt.end {
@@ -177,7 +171,11 @@ fn cmd_list_inner(opt: &Cli) -> anyhow::Result<()> {
     opt_set!(fs_opts, nochanges, 1);
     opt_set!(fs_opts, read_only, 1);
     opt_set!(fs_opts, norecovery, 1);
-    opt_set!(fs_opts, degraded, bch_degraded_actions::BCH_DEGRADED_very as u8);
+    opt_set!(
+        fs_opts,
+        degraded,
+        bch_degraded_actions::BCH_DEGRADED_very as u8
+    );
     opt_set!(
         fs_opts,
         errors,

@@ -14,7 +14,9 @@ fn leak(s: String) -> &'static str {
 
 /// Read a C string pointer, returning None if null or invalid UTF-8.
 unsafe fn c_str(p: *const std::os::raw::c_char) -> Option<&'static str> {
-    if p.is_null() { return None }
+    if p.is_null() {
+        return None;
+    }
     CStr::from_ptr(p).to_str().ok()
 }
 
@@ -23,9 +25,15 @@ fn for_each_opt(flag_filter: u32, mut f: impl FnMut(&'static str, &c::bch_option
     unsafe {
         for i in 0..c::bch_opt_id::bch2_opts_nr as usize {
             let opt = &*c::bch2_opt_table.as_ptr().add(i);
-            if opt.flags as u32 & flag_filter == 0 { continue }
-            if opt.flags as u32 & c::opt_flags::OPT_HIDDEN as u32 != 0 { continue }
-            let Some(name) = c_str(opt.attr.name) else { continue };
+            if opt.flags as u32 & flag_filter == 0 {
+                continue;
+            }
+            if opt.flags as u32 & c::opt_flags::OPT_HIDDEN as u32 != 0 {
+                continue;
+            }
+            let Some(name) = c_str(opt.attr.name) else {
+                continue;
+            };
             f(name, opt);
         }
     }
@@ -34,11 +42,15 @@ fn for_each_opt(flag_filter: u32, mut f: impl FnMut(&'static str, &c::bch_option
 /// Collect null-terminated C string array into Vec.
 unsafe fn collect_choices(choices: *const *const std::os::raw::c_char) -> Vec<&'static str> {
     let mut v = Vec::new();
-    if choices.is_null() { return v }
+    if choices.is_null() {
+        return v;
+    }
     let mut i = 0;
     loop {
         let p = *choices.add(i);
-        if p.is_null() { break }
+        if p.is_null() {
+            break;
+        }
         if let Some(s) = c_str(p) {
             v.push(s);
         }
@@ -58,9 +70,15 @@ pub fn opts_usage_str(flags_all: u32, flags_none: u32) -> String {
     unsafe {
         for i in 0..c::bch_opt_id::bch2_opts_nr as usize {
             let opt = &*c::bch2_opt_table.as_ptr().add(i);
-            if opt.flags as u32 & flags_all != flags_all { continue }
-            if opt.flags as u32 & flags_none != 0 { continue }
-            let Some(name) = c_str(opt.attr.name) else { continue };
+            if opt.flags as u32 & flags_all != flags_all {
+                continue;
+            }
+            if opt.flags as u32 & flags_none != 0 {
+                continue;
+            }
+            let Some(name) = c_str(opt.attr.name) else {
+                continue;
+            };
 
             let mut col = 0;
             let s = format!("      --{name}");
@@ -74,7 +92,10 @@ pub fn opts_usage_str(flags_all: u32, flags_none: u32) -> String {
                     col += 2;
                     let choices = collect_choices(opt.choices);
                     for (j, ch) in choices.iter().enumerate() {
-                        if j > 0 { out.push('|'); col += 1; }
+                        if j > 0 {
+                            out.push('|');
+                            col += 1;
+                        }
                         out.push_str(ch);
                         col += ch.len();
                     }
@@ -91,7 +112,9 @@ pub fn opts_usage_str(flags_all: u32, flags_none: u32) -> String {
 
             if let Some(help) = c_str(opt.help) {
                 for (j, line) in help.split('\n').enumerate() {
-                    if line.is_empty() && j > 0 { break; }
+                    if line.is_empty() && j > 0 {
+                        break;
+                    }
                     if j > 0 || col > HELPCOL {
                         out.push('\n');
                         col = 0;
@@ -132,10 +155,11 @@ pub fn bch_option_args(flag_filter: u32) -> Vec<Arg> {
 
         match opt.type_ {
             c::opt_type::BCH_OPT_BOOL => {
-                arg = arg.num_args(0..=1)
-                         .default_missing_value("1")
-                         .require_equals(true)
-                         .action(ArgAction::Set);
+                arg = arg
+                    .num_args(0..=1)
+                    .default_missing_value("1")
+                    .require_equals(true)
+                    .action(ArgAction::Set);
             }
             c::opt_type::BCH_OPT_STR => {
                 let choices = unsafe { collect_choices(opt.choices) };
@@ -143,13 +167,11 @@ pub fn bch_option_args(flag_filter: u32) -> Vec<Arg> {
                     arg = arg.value_parser(choices);
                 }
             }
-            _ => {
-                unsafe {
-                    if let Some(h) = c_str(opt.hint) {
-                        arg = arg.value_name(h);
-                    }
+            _ => unsafe {
+                if let Some(h) = c_str(opt.hint) {
+                    arg = arg.value_name(h);
                 }
-            }
+            },
         }
 
         args.push(arg);
@@ -195,10 +217,7 @@ pub fn bch_options_from_matches(matches: &ArgMatches, flag_filter: u32) -> Vec<(
 ///   `Ok(None)` — option needs an open filesystem, should be deferred
 ///   `Ok(Some(v))` — parsed value, ready to set with `bch2_opt_set_by_id`
 ///   `Err(...)` — parse error
-pub(crate) fn parse_opt_val(
-    opt: &c::bch_option,
-    val_str: &str,
-) -> Result<Option<u64>> {
+pub(crate) fn parse_opt_val(opt: &c::bch_option, val_str: &str) -> Result<Option<u64>> {
     let c_val = CString::new(val_str)?;
     let mut v: u64 = 0;
     let mut err = Printbuf::new();

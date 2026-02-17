@@ -33,14 +33,15 @@ fn read_data_event(fd: &mut std::fs::File) -> io::Result<(u8, u8, bch_ioctl_data
     let mut buf = [0u8; DATA_EVENT_SIZE];
     let n = fd.read(&mut buf)?;
     if n != DATA_EVENT_SIZE {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof,
-            format!("short read from progress fd: {} bytes", n)));
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("short read from progress fd: {} bytes", n),
+        ));
     }
     let event_type = buf[0];
     let event_ret = buf[1];
-    let p = unsafe {
-        std::ptr::read_unaligned(buf.as_ptr().add(8) as *const bch_ioctl_data_progress)
-    };
+    let p =
+        unsafe { std::ptr::read_unaligned(buf.as_ptr().add(8) as *const bch_ioctl_data_progress) };
     Ok((event_type, event_ret, p))
 }
 
@@ -61,13 +62,13 @@ fn start_scrub(ioctl_fd: i32, dev_idx: u32, data_types: u32) -> Result<std::fs::
 }
 
 struct ScrubDev {
-    name:           String,
-    progress_fd:    Option<std::fs::File>,
-    done:           u64,
-    corrected:      u64,
-    uncorrected:    u64,
-    total:          u64,
-    ret_status:     u8,
+    name:        String,
+    progress_fd: Option<std::fs::File>,
+    done:        u64,
+    corrected:   u64,
+    uncorrected: u64,
+    total:       u64,
+    ret_status:  u8,
 }
 
 impl ScrubDev {
@@ -80,20 +81,24 @@ impl ScrubDev {
 
         let status = if self.progress_fd.is_some() {
             format!("{}/sec", fmt_bytes_human(rate))
-        } else if self.ret_status == bch_ioctl_data_event_ret::BCH_IOCTL_DATA_EVENT_RET_device_offline as u8 {
+        } else if self.ret_status
+            == bch_ioctl_data_event_ret::BCH_IOCTL_DATA_EVENT_RET_device_offline as u8
+        {
             "offline".to_string()
         } else {
             "complete".to_string()
         };
 
-        format!("{:<16} {:>12} {:>12} {:>12} {:>12} {:>6}  {}",
+        format!(
+            "{:<16} {:>12} {:>12} {:>12} {:>12} {:>6}  {}",
             self.name,
             fmt_sectors_human(self.done),
             fmt_sectors_human(self.corrected),
             fmt_sectors_human(self.uncorrected),
             fmt_sectors_human(self.total),
             pct,
-            status)
+            status
+        )
     }
 }
 
@@ -111,7 +116,9 @@ pub struct Cli {
 pub fn scrub(argv: Vec<String>) -> Result<()> {
     let cli = Cli::parse_from(argv);
 
-    unsafe { libc::signal(libc::SIGINT, sigint_handler as libc::sighandler_t); }
+    unsafe {
+        libc::signal(libc::SIGINT, sigint_handler as libc::sighandler_t);
+    }
 
     let data_types: u32 = if cli.metadata {
         1 << (bch_data_type::BCH_DATA_btree as u32)
@@ -131,32 +138,48 @@ pub fn scrub(argv: Vec<String>) -> Result<()> {
     let mut scrub_devs: Vec<ScrubDev> = Vec::new();
 
     if dev_idx >= 0 {
-        let name = devices.iter()
+        let name = devices
+            .iter()
             .find(|d| d.idx == dev_idx as u32)
             .map(|d| d.dev.clone())
             .unwrap_or_else(|| format!("dev-{}", dev_idx));
 
         let fd = start_scrub(ioctl_fd, dev_idx as u32, data_types)?;
         scrub_devs.push(ScrubDev {
-            name, progress_fd: Some(fd),
-            done: 0, corrected: 0, uncorrected: 0, total: 0, ret_status: 0,
+            name,
+            progress_fd: Some(fd),
+            done: 0,
+            corrected: 0,
+            uncorrected: 0,
+            total: 0,
+            ret_status: 0,
         });
     } else {
         for dev in &devices {
             let fd = start_scrub(ioctl_fd, dev.idx, data_types)?;
             scrub_devs.push(ScrubDev {
-                name: dev.dev.clone(), progress_fd: Some(fd),
-                done: 0, corrected: 0, uncorrected: 0, total: 0, ret_status: 0,
+                name:        dev.dev.clone(),
+                progress_fd: Some(fd),
+                done:        0,
+                corrected:   0,
+                uncorrected: 0,
+                total:       0,
+                ret_status:  0,
             });
         }
     }
 
     let dev_names: Vec<&str> = scrub_devs.iter().map(|d| d.name.as_str()).collect();
-    println!("Starting scrub on {} devices: {}",
-        scrub_devs.len(), dev_names.join(" "));
+    println!(
+        "Starting scrub on {} devices: {}",
+        scrub_devs.len(),
+        dev_names.join(" ")
+    );
 
-    println!("{:<16} {:>12} {:>12} {:>12} {:>12} {:>6}",
-        "device", "checked", "corrected", "uncorrected", "total", "");
+    println!(
+        "{:<16} {:>12} {:>12} {:>12} {:>12} {:>6}",
+        "device", "checked", "corrected", "uncorrected", "total", ""
+    );
 
     let mut exit_code = 0i32;
     let mut last = Instant::now();
@@ -164,7 +187,11 @@ pub fn scrub(argv: Vec<String>) -> Result<()> {
 
     loop {
         let now = Instant::now();
-        let ns_elapsed = if first { 0u64 } else { (now - last).as_nanos() as u64 };
+        let ns_elapsed = if first {
+            0u64
+        } else {
+            (now - last).as_nanos() as u64
+        };
 
         let mut all_done = true;
         let mut lines: Vec<String> = Vec::new();
@@ -183,10 +210,14 @@ pub fn scrub(argv: Vec<String>) -> Result<()> {
                         }
 
                         if ns_elapsed > 0 {
-                            rate = p.sectors_done.wrapping_sub(dev.done)
-                                .checked_shl(9).unwrap_or(0)
+                            rate = p
+                                .sectors_done
+                                .wrapping_sub(dev.done)
+                                .checked_shl(9)
+                                .unwrap_or(0)
                                 .saturating_mul(1_000_000_000)
-                                .checked_div(ns_elapsed).unwrap_or(0);
+                                .checked_div(ns_elapsed)
+                                .unwrap_or(0);
                         }
 
                         dev.done = p.sectors_done;
@@ -194,8 +225,12 @@ pub fn scrub(argv: Vec<String>) -> Result<()> {
                         dev.uncorrected = p.sectors_error_uncorrected;
                         dev.total = p.sectors_total;
 
-                        if dev.corrected > 0 { exit_code |= 2; }
-                        if dev.uncorrected > 0 { exit_code |= 4; }
+                        if dev.corrected > 0 {
+                            exit_code |= 2;
+                        }
+                        if dev.uncorrected > 0 {
+                            exit_code |= 4;
+                        }
 
                         if event_ret != 0 {
                             dev.ret_status = event_ret;
@@ -220,14 +255,18 @@ pub fn scrub(argv: Vec<String>) -> Result<()> {
 
         if !first {
             for i in 0..scrub_devs.len() {
-                if i > 0 { write!(out, "\x1b[1A")?; }
+                if i > 0 {
+                    write!(out, "\x1b[1A")?;
+                }
                 write!(out, "\x1b[2K\r")?;
             }
         }
 
         for (i, line) in lines.iter().enumerate() {
             write!(out, "{}", line)?;
-            if i < lines.len() - 1 { writeln!(out)?; }
+            if i < lines.len() - 1 {
+                writeln!(out)?;
+            }
         }
         out.flush()?;
 

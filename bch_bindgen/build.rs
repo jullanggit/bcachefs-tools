@@ -43,7 +43,9 @@ fn parse_xmacro(header: &str, macro_name: &str) -> Vec<Vec<String>> {
     let bytes = macro_text.as_bytes();
     let mut pos = 0;
     while pos < bytes.len() {
-        let Some(start) = macro_text[pos..].find("x(") else { break };
+        let Some(start) = macro_text[pos..].find("x(") else {
+            break;
+        };
         let open = pos + start + 2;
         let mut depth = 1usize;
         let mut i = open;
@@ -53,7 +55,9 @@ fn parse_xmacro(header: &str, macro_name: &str) -> Vec<Vec<String>> {
                 b')' => depth -= 1,
                 _ => {}
             }
-            if depth > 0 { i += 1; }
+            if depth > 0 {
+                i += 1;
+            }
         }
         if depth == 0 {
             entries.push(split_xmacro_args(&macro_text[open..i]));
@@ -73,8 +77,14 @@ fn split_xmacro_args(s: &str) -> Vec<String> {
 
     for ch in s.chars() {
         match ch {
-            '(' => { depth += 1; current.push(ch); }
-            ')' => { depth -= 1; current.push(ch); }
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(ch);
+            }
             ',' if depth == 0 => {
                 args.push(current.trim().to_string());
                 current.clear();
@@ -241,7 +251,10 @@ fn generate_bkey_types(entries: &[Vec<String>]) -> String {
     out.push_str("/// Typed dispatch for split-const bkey references.\n");
     out.push_str("pub enum BkeyValSC<'a> {\n");
     for e in entries {
-        out.push_str(&format!("    {}(&'a c::bkey, &'a c::bch_{}),\n", e[0], e[0]));
+        out.push_str(&format!(
+            "    {}(&'a c::bkey, &'a c::bch_{}),\n",
+            e[0], e[0]
+        ));
     }
     out.push_str("    unknown(&'a c::bkey, u8),\n");
     out.push_str("}\n\n");
@@ -264,7 +277,9 @@ fn generate_bkey_types(entries: &[Vec<String>]) -> String {
     out.push_str("    /// Construct from raw key and value references.\n");
     out.push_str("    ///\n");
     out.push_str("    /// # Safety\n");
-    out.push_str("    /// `val` must point to valid data for the bkey type indicated by `k.type_`.\n");
+    out.push_str(
+        "    /// `val` must point to valid data for the bkey type indicated by `k.type_`.\n",
+    );
     out.push_str("    #[allow(clippy::missing_transmute_annotations)]\n");
     out.push_str("    pub unsafe fn from_raw(k: &'a c::bkey, val: &'a c::bch_val) -> Self {\n");
     out.push_str("        match k.type_ as u32 {\n");
@@ -283,7 +298,10 @@ fn generate_bkey_types(entries: &[Vec<String>]) -> String {
     out.push_str("/// Typed dispatch for split-mutable bkey references.\n");
     out.push_str("pub enum BkeyValS<'a> {\n");
     for e in entries {
-        out.push_str(&format!("    {}(&'a mut c::bkey, &'a mut c::bch_{}),\n", e[0], e[0]));
+        out.push_str(&format!(
+            "    {}(&'a mut c::bkey, &'a mut c::bch_{}),\n",
+            e[0], e[0]
+        ));
     }
     out.push_str("    unknown(&'a mut c::bkey, u8),\n");
     out.push_str("}\n\n");
@@ -465,7 +483,10 @@ fn main() {
     let members_h = std::fs::read_to_string(top_dir.join("../libbcachefs/sb/members_format.h"))
         .expect("reading members_format.h");
     let member_states = parse_xmacro(&members_h, "BCH_MEMBER_STATES");
-    assert!(!member_states.is_empty(), "failed to parse BCH_MEMBER_STATES()");
+    assert!(
+        !member_states.is_empty(),
+        "failed to parse BCH_MEMBER_STATES()"
+    );
     std::fs::write(
         out_dir.join("member_states_gen.rs"),
         generate_str_table("MEMBER_STATE_NAMES", &member_states),
@@ -475,7 +496,10 @@ fn main() {
     let counters_h = std::fs::read_to_string(top_dir.join("../libbcachefs/sb/counters_format.h"))
         .expect("reading counters_format.h");
     let counters = parse_xmacro(&counters_h, "BCH_PERSISTENT_COUNTERS");
-    assert!(!counters.is_empty(), "failed to parse BCH_PERSISTENT_COUNTERS()");
+    assert!(
+        !counters.is_empty(),
+        "failed to parse BCH_PERSISTENT_COUNTERS()"
+    );
     std::fs::write(
         out_dir.join("counters_gen.rs"),
         generate_counter_table(&counters),
@@ -485,7 +509,10 @@ fn main() {
     let extents_h = std::fs::read_to_string(top_dir.join("../libbcachefs/data/extents_format.h"))
         .expect("reading extents_format.h");
     let extent_entry_types = parse_xmacro(&extents_h, "BCH_EXTENT_ENTRY_TYPES");
-    assert!(!extent_entry_types.is_empty(), "failed to parse BCH_EXTENT_ENTRY_TYPES()");
+    assert!(
+        !extent_entry_types.is_empty(),
+        "failed to parse BCH_EXTENT_ENTRY_TYPES()"
+    );
     std::fs::write(
         out_dir.join("extent_entry_types_gen.rs"),
         generate_extent_entry_u64s(&extent_entry_types),

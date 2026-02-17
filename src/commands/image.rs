@@ -1,4 +1,4 @@
-use std::ffi::{CString, c_char};
+use std::ffi::{c_char, CString};
 use std::process;
 
 use anyhow::{anyhow, bail, Result};
@@ -7,7 +7,7 @@ use bch_bindgen::opt_set;
 use clap::Parser;
 
 use crate::commands::format::{
-    take_opt_value, take_short_value, metadata_version_current, version_parse,
+    metadata_version_current, take_opt_value, take_short_value, version_parse,
 };
 use crate::commands::opts::{bch_opt_lookup, opts_usage_str, parse_opt_val};
 use crate::key::Passphrase;
@@ -41,12 +41,10 @@ fn image_create_usage() {
         c::opt_flags::OPT_FORMAT as u32 | c::opt_flags::OPT_FS as u32,
         c::opt_flags::OPT_DEVICE as u32,
     );
-    let dev_opts = opts_usage_str(
-        c::opt_flags::OPT_DEVICE as u32,
-        c::opt_flags::OPT_FS as u32,
-    );
+    let dev_opts = opts_usage_str(c::opt_flags::OPT_DEVICE as u32, c::opt_flags::OPT_FS as u32);
 
-    print!("\
+    print!(
+        "\
 bcachefs image create - create a filesystem image from a directory
 Usage: bcachefs image create [OPTION]... <image>
 
@@ -75,7 +73,8 @@ Device specific options:
   -h, --help                   Display this help and exit
 
 Report bugs to <linux-bcachefs@vger.kernel.org>
-");
+"
+    );
 }
 
 pub fn cmd_image_create(argv: Vec<String>) -> Result<()> {
@@ -165,8 +164,7 @@ pub fn cmd_image_create(argv: Vec<String>) -> Result<()> {
                 }
                 "encrypted" => encrypted = true,
                 "passphrase_file" => {
-                    passphrase_file =
-                        Some(take_opt_value(inline_val, &argv, &mut i, raw_name)?);
+                    passphrase_file = Some(take_opt_value(inline_val, &argv, &mut i, raw_name)?);
                 }
                 "no_passphrase" => no_passphrase = true,
                 "fs_label" => {
@@ -287,8 +285,14 @@ pub fn cmd_image_create(argv: Vec<String>) -> Result<()> {
     });
 
     // Build C format_opts
-    let label_cstr = fs_label.as_ref().map(|l| CString::new(l.as_str())).transpose()?;
-    let dev_label_cstr = dev_label.as_ref().map(|l| CString::new(l.as_str())).transpose()?;
+    let label_cstr = fs_label
+        .as_ref()
+        .map(|l| CString::new(l.as_str()))
+        .transpose()?;
+    let dev_label_cstr = dev_label
+        .as_ref()
+        .map(|l| CString::new(l.as_str()))
+        .transpose()?;
     let source_cstr = CString::new(source.as_str())?;
     let path_cstr = CString::new(image_path.as_str())?;
 
@@ -373,11 +377,7 @@ pub struct ImageUpdateCli {
 pub fn cmd_image_update(argv: Vec<String>) -> Result<()> {
     let cli = ImageUpdateCli::parse_from(argv);
 
-    let verbosity: u32 = if cli.quiet {
-        0
-    } else {
-        1 + cli.verbose as u32
-    };
+    let verbosity: u32 = if cli.quiet { 0 } else { 1 + cli.verbose as u32 };
 
     let source_cstr = CString::new(cli.source.as_str())?;
     let image_cstr = CString::new(cli.image.as_str())?;

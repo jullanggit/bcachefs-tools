@@ -12,19 +12,19 @@ pub use bch_bindgen::accounting::*;
 
 /// Result of query_accounting ioctl.
 pub struct AccountingResult {
-    pub capacity: u64,
-    pub used: u64,
+    pub capacity:        u64,
+    pub used:            u64,
     pub online_reserved: u64,
-    pub entries: Vec<AccountingEntry>,
+    pub entries:         Vec<AccountingEntry>,
 }
 
 /// Header of bch_ioctl_query_accounting (fixed part before flex array).
 #[repr(C)]
 struct QueryAccountingHeader {
-    capacity: u64,
-    used: u64,
-    online_reserved: u64,
-    accounting_u64s: u32,
+    capacity:              u64,
+    used:                  u64,
+    online_reserved:       u64,
+    accounting_u64s:       u32,
     accounting_types_mask: u32,
 }
 
@@ -115,9 +115,19 @@ fn parse_accounting_entries(data: &[u8]) -> Vec<AccountingEntry> {
 
         // Extract bpos
         let mut bpos = c::bpos {
-            snapshot: u32::from_ne_bytes(entry_data[BPOS_OFFSET..BPOS_OFFSET+4].try_into().unwrap()),
-            offset: u64::from_ne_bytes(entry_data[BPOS_OFFSET+4..BPOS_OFFSET+12].try_into().unwrap()),
-            inode: u64::from_ne_bytes(entry_data[BPOS_OFFSET+12..BPOS_OFFSET+20].try_into().unwrap()),
+            snapshot: u32::from_ne_bytes(
+                entry_data[BPOS_OFFSET..BPOS_OFFSET + 4].try_into().unwrap(),
+            ),
+            offset:   u64::from_ne_bytes(
+                entry_data[BPOS_OFFSET + 4..BPOS_OFFSET + 12]
+                    .try_into()
+                    .unwrap(),
+            ),
+            inode:    u64::from_ne_bytes(
+                entry_data[BPOS_OFFSET + 12..BPOS_OFFSET + 20]
+                    .try_into()
+                    .unwrap(),
+            ),
         };
 
         if need_swab {

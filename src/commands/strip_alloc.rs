@@ -1,9 +1,9 @@
-use std::path::PathBuf;
-use bch_bindgen::c;
-use bch_bindgen::opt_set;
-use bch_bindgen::fs::Fs;
-use anyhow::bail;
 use crate::wrappers::bch_err_str;
+use anyhow::bail;
+use bch_bindgen::c;
+use bch_bindgen::fs::Fs;
+use bch_bindgen::opt_set;
+use std::path::PathBuf;
 
 fn strip_alloc_usage() {
     println!("bcachefs strip-alloc - remove alloc info and journal from a filesystem");
@@ -18,7 +18,8 @@ fn strip_alloc_usage() {
 pub fn cmd_strip_alloc(argv: Vec<String>) -> anyhow::Result<()> {
     let mut devs: Vec<PathBuf> = Vec::new();
 
-    for arg in argv.iter().skip(1) { // skip "strip-alloc"
+    for arg in argv.iter().skip(1) {
+        // skip "strip-alloc"
         match arg.as_str() {
             "-h" | "--help" => {
                 strip_alloc_usage();

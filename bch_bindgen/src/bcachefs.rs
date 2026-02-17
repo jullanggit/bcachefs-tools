@@ -86,7 +86,9 @@ impl bch_sb_handle {
 
 impl Drop for bch_sb_handle {
     fn drop(&mut self) {
-        unsafe { bch2_free_super(&mut *self); }
+        unsafe {
+            bch2_free_super(&mut *self);
+        }
     }
 }
 

@@ -1,6 +1,6 @@
-use std::ffi::{CStr, CString, c_char};
 use crate::c;
 use bch_bindgen::printbuf::Printbuf;
+use std::ffi::{c_char, CStr, CString};
 
 extern crate tiny_http;
 
@@ -21,8 +21,8 @@ fn http_thread(listen: String) {
                 let ret = unsafe { c::sysfs_read_or_html_dirlist(c_path.as_ptr(), buf.as_raw()) };
 
                 if ret < 0 {
-                    let response = Response::from_string(format!("Error {}", ret))
-                        .with_status_code(403);
+                    let response =
+                        Response::from_string(format!("Error {}", ret)).with_status_code(403);
                     request.respond(response).expect("Responded");
                 } else {
                     let response = Response::from_string(buf.as_str());
@@ -31,8 +31,8 @@ fn http_thread(listen: String) {
             }
 
             _ => {
-                let response = Response::from_string("Unsupported HTTP method")
-                    .with_status_code(405);
+                let response =
+                    Response::from_string("Unsupported HTTP method").with_status_code(405);
                 request.respond(response).expect("Responded");
             }
         };

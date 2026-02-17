@@ -1,6 +1,6 @@
 use crate::bcachefs;
 use crate::c;
-use crate::errcode::{BchError, errptr_to_result};
+use crate::errcode::{errptr_to_result, BchError};
 use std::ffi::CString;
 use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
@@ -52,7 +52,9 @@ pub struct SbLockGuard<'a> {
 
 impl Drop for SbLockGuard<'_> {
     fn drop(&mut self) {
-        unsafe { pthread_mutex_unlock(&mut (*self.fs.raw).sb_lock.lock); }
+        unsafe {
+            pthread_mutex_unlock(&mut (*self.fs.raw).sb_lock.lock);
+        }
     }
 }
 
@@ -73,7 +75,9 @@ impl Fs {
 
     /// Acquire the superblock lock, returning a guard that releases it on drop.
     pub fn sb_lock(&self) -> SbLockGuard<'_> {
-        unsafe { pthread_mutex_lock(&mut (*self.raw).sb_lock.lock); }
+        unsafe {
+            pthread_mutex_lock(&mut (*self.raw).sb_lock.lock);
+        }
         SbLockGuard { fs: self }
     }
 
@@ -93,15 +97,12 @@ impl Fs {
     }
 
     pub fn open(devs: &[PathBuf], mut opts: c::bch_opts) -> Result<Fs, BchError> {
-        let devs_cstrs : Vec<_> = devs
+        let devs_cstrs: Vec<_> = devs
             .iter()
             .map(|i| CString::new(i.as_os_str().as_bytes()).unwrap())
             .collect();
 
-        let mut devs_array: Vec<_> = devs_cstrs
-            .iter()
-            .map(|i| i.as_ptr())
-            .collect();
+        let mut devs_array: Vec<_> = devs_cstrs.iter().map(|i| i.as_ptr()).collect();
 
         let ret = unsafe {
             let mut devs: c::darray_const_str = std::mem::zeroed();
@@ -162,7 +163,11 @@ impl Fs {
             };
 
             let b = r.b;
-            if b.is_null() { None } else { Some(&*b) }
+            if b.is_null() {
+                None
+            } else {
+                Some(&*b)
+            }
         }
     }
 
@@ -183,21 +188,26 @@ impl Fs {
     /// doesn't exist or can't be referenced.
     pub fn dev_get(&self, dev: u32) -> Option<DevRef> {
         let ca = unsafe { rust_dev_tryget_noerror(self.raw, dev) };
-        if ca.is_null() { None } else { Some(DevRef(ca)) }
+        if ca.is_null() {
+            None
+        } else {
+            Some(DevRef(ca))
+        }
     }
 
     /// Check if a device index exists and has a device pointer.
     pub fn dev_exists(&self, dev: u32) -> bool {
         unsafe {
             let c = &*self.raw;
-            (dev as usize) < c.sb.nr_devices as usize
-                && !c.devs[dev as usize].is_null()
+            (dev as usize) < c.sb.nr_devices as usize && !c.devs[dev as usize].is_null()
         }
     }
 }
 
 impl Drop for Fs {
     fn drop(&mut self) {
-        unsafe { c::bch2_fs_exit(self.raw); }
+        unsafe {
+            c::bch2_fs_exit(self.raw);
+        }
     }
 }

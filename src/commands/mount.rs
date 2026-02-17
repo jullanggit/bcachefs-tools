@@ -6,11 +6,11 @@ use std::{
     ptr, str,
 };
 
+use crate::device_scan;
 use anyhow::{ensure, Result};
 use bch_bindgen::{bcachefs, bcachefs::bch_sb_handle, path_to_cstr};
 use clap::Parser;
 use log::{debug, error, info};
-use crate::device_scan;
 
 use crate::{
     key::{KeyHandle, Keyring, Passphrase, UnlockPolicy},
@@ -33,7 +33,9 @@ fn mount_inner(
     // convert to pointers for ffi
     let c_src = c_src.as_ptr();
     let c_target = c_target.as_ptr();
-    let data_ptr = data.as_ref().map_or(ptr::null(), |data| data.as_ptr().cast());
+    let data_ptr = data
+        .as_ref()
+        .map_or(ptr::null(), |data| data.as_ptr().cast());
     let fstype = fstype.as_ptr();
 
     let mut ret;
@@ -64,7 +66,11 @@ fn mount_inner(
         let e = crate::ErrnoError(err);
 
         if err.0 == libc::EBUSY {
-            eprintln!("mount: {}: {:?} already mounted or mount point busy", target.to_string_lossy(), src);
+            eprintln!(
+                "mount: {}: {:?} already mounted or mount point busy",
+                target.to_string_lossy(),
+                src
+            );
         } else {
             eprintln!("mount: {:?}: {}", src, e);
         }
@@ -138,8 +144,8 @@ fn handle_unlock(cli: &Cli, sb: &bch_sb_handle) -> Result<KeyHandle> {
 
 fn cmd_mount_inner(cli: &Cli) -> Result<()> {
     let (optstr, mountflags) = parse_mountflag_options(&cli.options);
-    let opts = bch_bindgen::opts::parse_mount_opts(None, optstr.as_deref(), true)
-        .unwrap_or_default();
+    let opts =
+        bch_bindgen::opts::parse_mount_opts(None, optstr.as_deref(), true).unwrap_or_default();
 
     let sbs = device_scan::scan_sbs(&cli.dev, &opts)?;
 
@@ -242,8 +248,8 @@ pub fn mount(mut argv: Vec<String>, symlink_cmd: Option<&str>) -> std::process::
 
     #[cfg(feature = "fuse")]
     if cli.fs_type == "bcachefs.fuse" {
-        use std::ffi::c_char;
         use bch_bindgen::c;
+        use std::ffi::c_char;
 
         let argc: i32 = argv.len().try_into().unwrap();
 
@@ -254,17 +260,15 @@ pub fn mount(mut argv: Vec<String>, symlink_cmd: Option<&str>) -> std::process::
             .collect::<Box<[*mut c_char]>>();
         let argv = argv.as_mut_ptr();
 
-        return std::process::ExitCode::from(
-            unsafe { c::cmd_fusemount(argc, argv) } as u8
-        );
+        return std::process::ExitCode::from(unsafe { c::cmd_fusemount(argc, argv) } as u8);
     }
 
     // TODO: centralize this on the top level CLI
     logging::setup(cli.verbose, cli.colorize);
 
     match cmd_mount_inner(&cli) {
-        Ok(_)   => std::process::ExitCode::SUCCESS,
-        Err(e)   => {
+        Ok(_) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
             error!("Mount failed for {}: {e}", cli.dev);
             if !module_loaded {
                 error!("bcachefs module not loaded?");

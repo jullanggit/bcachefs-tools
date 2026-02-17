@@ -1,6 +1,6 @@
 use crate::c;
 use crate::fs::Fs;
-use std::ffi::{CString, c_char};
+use std::ffi::{c_char, CString};
 
 #[macro_export]
 macro_rules! opt_set {
@@ -38,8 +38,11 @@ macro_rules! opt_get {
     };
 }
 
-pub fn parse_mount_opts(fs: Option<&mut Fs>, optstr: Option<&str>, ignore_unknown: bool)
-        -> Result<c::bch_opts, crate::errcode::BchError> {
+pub fn parse_mount_opts(
+    fs: Option<&mut Fs>,
+    optstr: Option<&str>,
+    ignore_unknown: bool,
+) -> Result<c::bch_opts, crate::errcode::BchError> {
     let mut opts: c::bch_opts = Default::default();
 
     if let Some(optstr) = optstr {
@@ -47,11 +50,13 @@ pub fn parse_mount_opts(fs: Option<&mut Fs>, optstr: Option<&str>, ignore_unknow
         let optstr_ptr = optstr.as_ptr();
 
         let ret = unsafe {
-            c::bch2_parse_mount_opts(fs.map_or(std::ptr::null_mut(), |f| f.raw),
-                                     &mut opts as *mut c::bch_opts,
-                                     std::ptr::null_mut(),
-                                     optstr_ptr as *mut c_char,
-                                     ignore_unknown)
+            c::bch2_parse_mount_opts(
+                fs.map_or(std::ptr::null_mut(), |f| f.raw),
+                &mut opts as *mut c::bch_opts,
+                std::ptr::null_mut(),
+                optstr_ptr as *mut c_char,
+                ignore_unknown,
+            )
         };
 
         drop(optstr);

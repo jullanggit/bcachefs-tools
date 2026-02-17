@@ -38,7 +38,7 @@ pub fn sb_is_encrypted(sb: &bch_sb_handle) -> bool {
 pub fn unencrypted_key(key: &bch_key) -> bch_encrypted_key {
     bch_encrypted_key {
         magic: u64::from_le_bytes(*BCH_KEY_MAGIC),
-        key: *key,
+        key:   *key,
     }
 }
 
@@ -85,12 +85,14 @@ impl UnlockPolicy {
         match self {
             Self::Fail => KeyHandle::new_from_search(&uuid),
             Self::Wait => Ok(KeyHandle::wait_for_unlock(&uuid)?),
-            Self::Ask => Passphrase::new_from_prompt(&uuid).and_then(|p| KeyHandle::new(sb, &p, Keyring::User)),
-            Self::Stdin => Passphrase::new_from_stdin().and_then(|p| KeyHandle::new(sb, &p, Keyring::User)),
+            Self::Ask => Passphrase::new_from_prompt(&uuid)
+                .and_then(|p| KeyHandle::new(sb, &p, Keyring::User)),
+            Self::Stdin => {
+                Passphrase::new_from_stdin().and_then(|p| KeyHandle::new(sb, &p, Keyring::User))
+            }
         }
     }
 }
-
 
 /// Proof that a bcachefs key has been added to or found in the kernel keyring.
 pub struct KeyHandle;
@@ -233,7 +235,10 @@ impl Passphrase {
         }
         let pass1 = Self::prompt_hidden("Enter new passphrase: ")?;
         let pass2 = Self::prompt_hidden("Enter same passphrase again: ")?;
-        ensure!(pass1.get().to_bytes() == pass2.get().to_bytes(), "Passphrases do not match");
+        ensure!(
+            pass1.get().to_bytes() == pass2.get().to_bytes(),
+            "Passphrases do not match"
+        );
         Ok(pass1)
     }
 
@@ -268,15 +273,11 @@ impl Passphrase {
 
     /// Re-encrypt a filesystem key with this passphrase.
     /// Returns the encrypted key suitable for writing to crypt->key.
-    pub fn encrypt_key(
-        &self,
-        sb: &bch_sb_handle,
-        key: &bch_key,
-    ) -> bch_encrypted_key {
+    pub fn encrypt_key(&self, sb: &bch_sb_handle, key: &bch_key) -> bch_encrypted_key {
         let crypt = sb.sb().crypt().expect("called on encrypted fs");
         let mut new_key = bch_encrypted_key {
             magic: u64::from_le_bytes(*BCH_KEY_MAGIC),
-            key: *key,
+            key:   *key,
         };
 
         let mut passphrase_key: bch_key = self.derive(crypt);

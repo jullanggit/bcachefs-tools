@@ -13,8 +13,8 @@ use clap::Parser;
 use rustix::event::{poll, PollFd, PollFlags};
 
 use crate::wrappers::handle::BcachefsHandle;
-use bch_bindgen::printbuf::Printbuf;
 use crate::wrappers::sysfs;
+use bch_bindgen::printbuf::Printbuf;
 
 // _IOW(0xbc, 19, struct bch_ioctl_fsck_offline) — sizeof = 24
 const BCH_IOCTL_FSCK_OFFLINE: libc::c_ulong = 0x4018bc13;
@@ -134,15 +134,16 @@ fn fsck_online(fs: &BcachefsHandle, opt_str: &str) -> Result<i32> {
     let c_opts = CString::new(opt_str)?;
     let fsck = c::bch_ioctl_fsck_online {
         flags: 0,
-        opts: c_opts.as_ptr() as u64,
+        opts:  c_opts.as_ptr() as u64,
     };
 
-    let fsck_fd = unsafe {
-        libc::ioctl(fs.ioctl_fd_raw(), BCH_IOCTL_FSCK_ONLINE, &fsck)
-    };
+    let fsck_fd = unsafe { libc::ioctl(fs.ioctl_fd_raw(), BCH_IOCTL_FSCK_ONLINE, &fsck) };
     if fsck_fd < 0 {
         let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
-        return Err(anyhow!("BCH_IOCTL_FSCK_ONLINE error: {}", crate::wrappers::bch_err_str(errno)));
+        return Err(anyhow!(
+            "BCH_IOCTL_FSCK_ONLINE error: {}",
+            crate::wrappers::bch_err_str(errno)
+        ));
     }
 
     let fd = unsafe { BorrowedFd::borrow_raw(fsck_fd) };
@@ -174,8 +175,8 @@ fn should_use_kernel_fsck(devs: &[String]) -> bool {
 
     let sb_version = fs.sb().version as u64;
 
-    let ret = (current < kernel_version && kernel_version <= sb_version) ||
-              (sb_version <= kernel_version && kernel_version < current);
+    let ret = (current < kernel_version && kernel_version <= sb_version)
+        || (sb_version <= kernel_version && kernel_version < current);
 
     if ret {
         let mut buf = Printbuf::new();
@@ -308,7 +309,9 @@ pub fn cmd_fsck(argv: Vec<String>) -> Result<()> {
                         loopdevs.push(l);
                     }
                     None => {
-                        for l in &loopdevs { loopdev_free(l); }
+                        for l in &loopdevs {
+                            loopdev_free(l);
+                        }
                         if kernel == Some(true) {
                             return Err(anyhow!("error setting up loop devices"));
                         }
@@ -323,7 +326,8 @@ pub fn cmd_fsck(argv: Vec<String>) -> Result<()> {
         let base_size = std::mem::size_of::<c::bch_ioctl_fsck_offline>();
         let total_size = base_size + dev_ptrs.len() * std::mem::size_of::<u64>();
         let layout = std::alloc::Layout::from_size_align(total_size, 8).unwrap();
-        let fsck_ptr = unsafe { std::alloc::alloc_zeroed(layout) } as *mut c::bch_ioctl_fsck_offline;
+        let fsck_ptr =
+            unsafe { std::alloc::alloc_zeroed(layout) } as *mut c::bch_ioctl_fsck_offline;
 
         let c_opts = CString::new(opts_str.as_str())?;
         unsafe {
@@ -336,7 +340,8 @@ pub fn cmd_fsck(argv: Vec<String>) -> Result<()> {
         }
 
         let fsck_fd = match std::fs::OpenOptions::new()
-            .read(true).write(true)
+            .read(true)
+            .write(true)
             .open("/dev/bcachefs-ctl")
         {
             Ok(ctl_file) => unsafe {
@@ -345,9 +350,13 @@ pub fn cmd_fsck(argv: Vec<String>) -> Result<()> {
             Err(_) => -1,
         };
 
-        unsafe { std::alloc::dealloc(fsck_ptr as *mut u8, layout); }
+        unsafe {
+            std::alloc::dealloc(fsck_ptr as *mut u8, layout);
+        }
 
-        for l in &loopdevs { loopdev_free(l); }
+        for l in &loopdevs {
+            loopdev_free(l);
+        }
 
         if fsck_fd < 0 && kernel.is_none() {
             return run_userspace_fsck(devices, &opts_str);
@@ -355,7 +364,10 @@ pub fn cmd_fsck(argv: Vec<String>) -> Result<()> {
 
         if fsck_fd < 0 {
             let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
-            return Err(anyhow!("BCH_IOCTL_FSCK_OFFLINE error: {}", crate::wrappers::bch_err_str(errno)));
+            return Err(anyhow!(
+                "BCH_IOCTL_FSCK_OFFLINE error: {}",
+                crate::wrappers::bch_err_str(errno)
+            ));
         }
 
         let fd = unsafe { BorrowedFd::borrow_raw(fsck_fd) };
@@ -402,7 +414,10 @@ fn run_userspace_fsck(devices: &[String], opts_str: &str) -> Result<()> {
     let ret2 = fs.exit();
 
     if ret2 != 0 {
-        eprintln!("error shutting down filesystem: {}", crate::wrappers::bch_err_str(ret2));
+        eprintln!(
+            "error shutting down filesystem: {}",
+            crate::wrappers::bch_err_str(ret2)
+        );
         process::exit(ret | 8);
     }
 

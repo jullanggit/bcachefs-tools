@@ -83,7 +83,8 @@ impl PartialOrd for c::bbpos {
 
 impl Ord for c::bbpos {
     fn cmp(&self, other: &Self) -> Ordering {
-        (self.btree as u32).cmp(&(other.btree as u32))
+        (self.btree as u32)
+            .cmp(&(other.btree as u32))
             .then(self.pos.cmp(&other.pos))
     }
 }
@@ -104,8 +105,7 @@ impl c::btree_id {
 
     /// Iterate over all known btree IDs.
     pub fn iter_known() -> impl Iterator<Item = Self> {
-        (0..Self::BTREE_ID_NR as u32)
-            .map(|id| unsafe { std::mem::transmute::<u32, Self>(id) })
+        (0..Self::BTREE_ID_NR as u32).map(|id| unsafe { std::mem::transmute::<u32, Self>(id) })
     }
 }
 
@@ -162,8 +162,7 @@ impl FromStr for c::btree_id {
 
         let v =
             unsafe { c::match_string(c::__bch2_btree_ids[..].as_ptr(), (-1_isize) as usize, p) };
-        c::btree_id::from_raw(v as u32)
-            .ok_or(BchToolsErr::InvalidBtreeId)
+        c::btree_id::from_raw(v as u32).ok_or(BchToolsErr::InvalidBtreeId)
     }
 }
 
@@ -171,13 +170,10 @@ impl FromStr for c::bbpos {
     type Err = BchToolsErr;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (btree_s, pos_s) = s.split_once(':')
-            .ok_or(BchToolsErr::InvalidBbpos)?;
+        let (btree_s, pos_s) = s.split_once(':').ok_or(BchToolsErr::InvalidBbpos)?;
 
-        let btree: c::btree_id = btree_s.parse()
-            .map_err(|_| BchToolsErr::InvalidBbpos)?;
-        let pos: c::bpos = pos_s.parse()
-            .map_err(|_| BchToolsErr::InvalidBbpos)?;
+        let btree: c::btree_id = btree_s.parse().map_err(|_| BchToolsErr::InvalidBbpos)?;
+        let pos: c::bpos = pos_s.parse().map_err(|_| BchToolsErr::InvalidBbpos)?;
 
         Ok(c::bbpos { btree, pos })
     }

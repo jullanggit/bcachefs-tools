@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use bch_bindgen::c;
 use clap::{Arg, ArgAction, Command};
-use rustix::fs::{XattrFlags, setxattr, removexattr};
+use rustix::fs::{removexattr, setxattr, XattrFlags};
 
 use super::opts;
 
@@ -28,15 +28,26 @@ fn propagate_recurse(dir_path: &Path) {
         let dir = std::fs::File::open(dir_path)?;
         for entry in std::fs::read_dir(dir_path)?.flatten() {
             let Ok(ft) = entry.file_type() else { continue };
-            if ft.is_symlink() { continue }
-            let Ok(name) = CString::new(entry.file_name().as_bytes().to_vec()) else { continue };
-
-            let ret = unsafe { libc::ioctl(dir.as_raw_fd(), BCHFS_IOC_REINHERIT_ATTRS, name.as_ptr()) };
-            if ret < 0 {
-                eprintln!("{}: {}", entry.path().display(), std::io::Error::last_os_error());
+            if ft.is_symlink() {
                 continue;
             }
-            if ret == 0 || !ft.is_dir() { continue }
+            let Ok(name) = CString::new(entry.file_name().as_bytes().to_vec()) else {
+                continue;
+            };
+
+            let ret =
+                unsafe { libc::ioctl(dir.as_raw_fd(), BCHFS_IOC_REINHERIT_ATTRS, name.as_ptr()) };
+            if ret < 0 {
+                eprintln!(
+                    "{}: {}",
+                    entry.path().display(),
+                    std::io::Error::last_os_error()
+                );
+                continue;
+            }
+            if ret == 0 || !ft.is_dir() {
+                continue;
+            }
             propagate_recurse(&entry.path());
         }
         Ok(())
@@ -49,8 +60,12 @@ fn propagate_recurse(dir_path: &Path) {
 fn remove_bcachefs_attr(path: &Path, attr_name: &str) {
     if let Err(e) = removexattr(path, attr_name) {
         if e != rustix::io::Errno::NODATA && e != rustix::io::Errno::INVAL {
-            eprintln!("error removing attribute {} from {}: {}",
-                attr_name, path.display(), e);
+            eprintln!(
+                "error removing attribute {} from {}: {}",
+                attr_name,
+                path.display(),
+                e
+            );
         }
     }
 }
@@ -59,7 +74,9 @@ fn do_setattr(path: &Path, opts: &[(String, String)], remove_all: bool) -> Resul
     if remove_all {
         for name in opts::bch_option_names(c::opt_flags::OPT_INODE as u32) {
             // casefold only works on empty directories
-            if name == "casefold" { continue }
+            if name == "casefold" {
+                continue;
+            }
             remove_bcachefs_attr(path, &format!("bcachefs.{}", name));
         }
     }
@@ -89,13 +106,13 @@ pub(super) fn setattr_cmd() -> Command {
         .about("Set attributes on files in a bcachefs filesystem")
         .after_help("To remove a specific option, use: --option=-")
         .args(opts::bch_option_args(c::opt_flags::OPT_INODE as u32))
-        .arg(Arg::new("remove-all")
-            .long("remove-all")
-            .action(ArgAction::SetTrue)
-            .help("Remove all file options"))
-        .arg(Arg::new("files")
-            .action(ArgAction::Append)
-            .required(true))
+        .arg(
+            Arg::new("remove-all")
+                .long("remove-all")
+                .action(ArgAction::SetTrue)
+                .help("Remove all file options"),
+        )
+        .arg(Arg::new("files").action(ArgAction::Append).required(true))
 }
 
 pub fn cmd_setattr(argv: Vec<String>) -> Result<()> {
@@ -114,18 +131,22 @@ pub fn cmd_setattr(argv: Vec<String>) -> Result<()> {
 pub(super) fn reflink_option_propagate_cmd() -> Command {
     Command::new("reflink-option-propagate")
         .about("Propagate IO options to reflinked extents")
-        .long_about("Propagates each file's current IO options to its extents, including \
-                      indirect (reflinked) extents.")
-        .arg(Arg::new("set-may-update")
-            .long("set-may-update")
-            .action(ArgAction::SetTrue)
-            .help("Enable option propagation on old reflink_p extents that \
+        .long_about(
+            "Propagates each file's current IO options to its extents, including \
+                      indirect (reflinked) extents.",
+        )
+        .arg(
+            Arg::new("set-may-update")
+                .long("set-may-update")
+                .action(ArgAction::SetTrue)
+                .help(
+                    "Enable option propagation on old reflink_p extents that \
                    predate the may_update_options flag. Requires CAP_SYS_ADMIN. \
                    Only needed once per file for filesystems with reflinks \
-                   created before the flag was introduced."))
-        .arg(Arg::new("files")
-            .action(ArgAction::Append)
-            .required(true))
+                   created before the flag was introduced.",
+                ),
+        )
+        .arg(Arg::new("files").action(ArgAction::Append).required(true))
 }
 
 fn do_reflink_propagate(path: &str, set_may_update: bool) -> Result<()> {
@@ -133,14 +154,15 @@ fn do_reflink_propagate(path: &str, set_may_update: bool) -> Result<()> {
     let fd = file.as_raw_fd();
 
     if set_may_update {
-        ioctl_none(fd, BCHFS_IOC_SET_REFLINK_P_MAY_UPDATE_OPTS)
-            .context("set may_update_opts")?;
+        ioctl_none(fd, BCHFS_IOC_SET_REFLINK_P_MAY_UPDATE_OPTS).context("set may_update_opts")?;
     }
 
     ioctl_none(fd, BCHFS_IOC_PROPAGATE_REFLINK_P_OPTS).map_err(|e| {
         if e.raw_os_error() == Some(libc::EPERM) {
-            anyhow!("reflink_p extents without may_update_options set;\n\
-                     rerun as root with --set-may-update")
+            anyhow!(
+                "reflink_p extents without may_update_options set;\n\
+                     rerun as root with --set-may-update"
+            )
         } else {
             anyhow!(e).context("propagate reflink opts")
         }

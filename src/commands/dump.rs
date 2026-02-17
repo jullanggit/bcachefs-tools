@@ -7,16 +7,16 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use clap::Parser;
 
+use bch_bindgen::accounting;
 use bch_bindgen::bkey::BkeySC;
 use bch_bindgen::btree::*;
-use bch_bindgen::accounting;
 use bch_bindgen::c;
 use bch_bindgen::data::extents::bkey_ptrs_sc;
 use bch_bindgen::fs::Fs;
 use bch_bindgen::opt_set;
 use bch_bindgen::POS_MIN;
 
-use crate::qcow2::{self, Qcow2Image, Ranges, range_add, ranges_sort};
+use crate::qcow2::{self, range_add, ranges_sort, Qcow2Image, Ranges};
 use crate::wrappers::super_io::vstruct_bytes_sb;
 
 extern "C" {
@@ -94,7 +94,7 @@ pub fn cmd_undump(argv: Vec<String>) -> Result<()> {
     let suffix = ".qcow2";
 
     struct FileEntry {
-        input: String,
+        input:  String,
         output: String,
     }
 
@@ -111,12 +111,15 @@ pub fn cmd_undump(argv: Vec<String>) -> Result<()> {
             return Err(anyhow!("{} already exists", output));
         }
 
-        entries.push(FileEntry { input: f.clone(), output });
+        entries.push(FileEntry {
+            input: f.clone(),
+            output,
+        });
     }
 
     for e in &entries {
-        let infile = std::fs::File::open(&e.input)
-            .map_err(|err| anyhow!("{}: {}", e.input, err))?;
+        let infile =
+            std::fs::File::open(&e.input).map_err(|err| anyhow!("{}: {}", e.input, err))?;
 
         let mut open_opts = std::fs::OpenOptions::new();
         open_opts.write(true).create(true);
@@ -126,7 +129,8 @@ pub fn cmd_undump(argv: Vec<String>) -> Result<()> {
             open_opts.truncate(false);
         }
 
-        let outfile = open_opts.open(&e.output)
+        let outfile = open_opts
+            .open(&e.output)
             .map_err(|err| anyhow!("{}: {}", e.output, err))?;
 
         qcow2::qcow2_to_raw(infile.as_raw_fd(), outfile.as_raw_fd())?;
@@ -138,12 +142,12 @@ pub fn cmd_undump(argv: Vec<String>) -> Result<()> {
 // ---- Sanitize implementation ----
 
 // On-disk struct sizes (all __packed, little-endian x86_64)
-const JSET_HDR: usize = 56;            // offsetof(jset, _data)
-const JSET_ENTRY_HDR: usize = 8;       // offsetof(jset_entry, start)
-const BSET_HDR: usize = 24;            // offsetof(bset, _data)
-const BTREE_NODE_KEYS: usize = 136;    // offsetof(btree_node, keys)
-const BNE_KEYS: usize = 16;            // offsetof(btree_node_entry, keys)
-const BKEY_U64S: usize = 5;            // sizeof(bkey) / 8
+const JSET_HDR: usize = 56; // offsetof(jset, _data)
+const JSET_ENTRY_HDR: usize = 8; // offsetof(jset_entry, start)
+const BSET_HDR: usize = 24; // offsetof(bset, _data)
+const BTREE_NODE_KEYS: usize = 136; // offsetof(btree_node, keys)
+const BNE_KEYS: usize = 16; // offsetof(btree_node_entry, keys)
+const BKEY_U64S: usize = 5; // sizeof(bkey) / 8
 
 fn read_le64(buf: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
@@ -228,8 +232,12 @@ fn sanitize_journal_keys(
         let key_type = buf[pos + 2];
         let val_off = BKEY_U64S * 8;
         if val_off < key_bytes
-            && sanitize_val(&mut buf[pos + val_off..pos + key_bytes],
-                            key_type, sanitize_filenames) {
+            && sanitize_val(
+                &mut buf[pos + val_off..pos + key_bytes],
+                key_type,
+                sanitize_filenames,
+            )
+        {
             modified = true;
         }
 
@@ -288,8 +296,13 @@ fn sanitize_journal(fs_raw: *mut c::bch_fs, buf: &mut [u8], sanitize_filenames: 
             // jset_entry_is_key: btree_keys(0), btree_root(1), write_buffer_keys(11)
             let entry_type = buf[entry_pos + 4];
             if (entry_type == 0 || entry_type == 1 || entry_type == 11)
-                && sanitize_journal_keys(buf, entry_pos + JSET_ENTRY_HDR,
-                                         entry_end, sanitize_filenames) {
+                && sanitize_journal_keys(
+                    buf,
+                    entry_pos + JSET_ENTRY_HDR,
+                    entry_end,
+                    sanitize_filenames,
+                )
+            {
                 modified = true;
             }
 
@@ -300,8 +313,7 @@ fn sanitize_journal(fs_raw: *mut c::bch_fs, buf: &mut [u8], sanitize_filenames: 
             clear_csum(buf, pos, pos + 36);
         }
 
-        pos += vstruct_aligned_bytes(vstruct_bytes, block_bits)
-            .min(buf.len() - pos);
+        pos += vstruct_aligned_bytes(vstruct_bytes, block_bits).min(buf.len() - pos);
     }
 }
 
@@ -331,7 +343,7 @@ fn sanitize_btree(fs_raw: *mut c::bch_fs, buf: &mut [u8], sanitize_filenames: bo
             bset_off = pos + BTREE_NODE_KEYS;
             data_off = pos + BTREE_NODE_KEYS + BSET_HDR;
             format_key_u64s = buf[pos + 80] as usize; // btree_node.format.key_u64s
-            seq = read_le64(buf, bset_off);            // bset.seq
+            seq = read_le64(buf, bset_off); // bset.seq
             let u64s = read_le16(buf, bset_off + 22) as usize;
             vstruct_bytes = BTREE_NODE_KEYS + BSET_HDR + u64s * 8;
         } else {
@@ -362,8 +374,11 @@ fn sanitize_btree(fs_raw: *mut c::bch_fs, buf: &mut [u8], sanitize_filenames: bo
             }
 
             let ret = unsafe {
-                rust_bset_decrypt(fs_raw, buf.as_mut_ptr().add(bset_off),
-                                  bset_byte_offset as u32)
+                rust_bset_decrypt(
+                    fs_raw,
+                    buf.as_mut_ptr().add(bset_off),
+                    bset_byte_offset as u32,
+                )
             };
             if ret != 0 {
                 eprintln!("error decrypting btree node: {}", ret);
@@ -390,12 +405,20 @@ fn sanitize_btree(fs_raw: *mut c::bch_fs, buf: &mut [u8], sanitize_filenames: bo
 
             let key_type = buf[key_pos + 2];
             let key_format = buf[key_pos + 1] & 0x7f;
-            let key_hdr_u64s = if key_format != 0 { format_key_u64s } else { BKEY_U64S };
+            let key_hdr_u64s = if key_format != 0 {
+                format_key_u64s
+            } else {
+                BKEY_U64S
+            };
             let val_off = key_hdr_u64s * 8;
 
             if val_off < key_bytes
-                && sanitize_val(&mut buf[key_pos + val_off..key_pos + key_bytes],
-                                key_type, sanitize_filenames) {
+                && sanitize_val(
+                    &mut buf[key_pos + val_off..key_pos + key_bytes],
+                    key_type,
+                    sanitize_filenames,
+                )
+            {
                 modified = true;
             }
 
@@ -409,8 +432,7 @@ fn sanitize_btree(fs_raw: *mut c::bch_fs, buf: &mut [u8], sanitize_filenames: bo
         }
 
         first = false;
-        let advance = vstruct_aligned_bytes(vstruct_bytes, block_bits)
-            .min(buf.len() - pos);
+        let advance = vstruct_aligned_bytes(vstruct_bytes, block_bits).min(buf.len() - pos);
         bset_byte_offset += advance;
         pos += advance;
     }
@@ -450,9 +472,11 @@ fn get_sb_journal(fs: &Fs, ca: &c::bch_dev, entire_journal: bool, d: &mut DumpDe
     let bucket_bytes = (ca.mi.bucket_size as u64) << 9;
 
     // Superblock layout
-    range_add(&mut d.sb,
-              (c::BCH_SB_LAYOUT_SECTOR as u64) << 9,
-              std::mem::size_of::<c::bch_sb_layout>() as u64);
+    range_add(
+        &mut d.sb,
+        (c::BCH_SB_LAYOUT_SECTOR as u64) << 9,
+        std::mem::size_of::<c::bch_sb_layout>() as u64,
+    );
 
     // All superblock copies
     for i in 0..sb.layout.nr_superblocks as usize {
@@ -513,7 +537,8 @@ fn write_dev_image(
         open_opts.truncate(true);
     }
 
-    let outfile = open_opts.open(path)
+    let outfile = open_opts
+        .open(path)
         .map_err(|e| anyhow!("{}: {}", path, e))?;
 
     let infd = unsafe { (*ca.disk_sb.bdev).bd_fd };
@@ -527,12 +552,20 @@ fn write_dev_image(
     } else {
         let bucket_bytes = (ca.mi.bucket_size as u64) << 9;
         write_sanitized_ranges(
-            &mut img, fs.raw, &mut d.journal, bucket_bytes,
-            sanitize_filenames, sanitize_journal,
+            &mut img,
+            fs.raw,
+            &mut d.journal,
+            bucket_bytes,
+            sanitize_filenames,
+            sanitize_journal,
         )?;
         write_sanitized_ranges(
-            &mut img, fs.raw, &mut d.btree, bucket_bytes,
-            sanitize_filenames, sanitize_btree,
+            &mut img,
+            fs.raw,
+            &mut d.btree,
+            bucket_bytes,
+            sanitize_filenames,
+            sanitize_btree,
         )?;
     }
 
@@ -558,8 +591,10 @@ fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool) -> 
     let _ = fs.for_each_online_member(|ca| {
         if sanitize && (ca.mi.bucket_size as u32) % (block_size >> 9) != 0 {
             let name = unsafe { CStr::from_ptr(ca.name.as_ptr()) };
-            bucket_err = Some(format!("{} has unaligned buckets, cannot sanitize",
-                                      name.to_str().unwrap_or("?")));
+            bucket_err = Some(format!(
+                "{} has unaligned buckets, cannot sanitize",
+                name.to_str().unwrap_or("?")
+            ));
             return ControlFlow::Break(());
         }
 
@@ -583,14 +618,21 @@ fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool) -> 
             BtreeIterFlags::PREFETCH,
         );
 
-        node_iter.for_each(&trans, |b| {
-            let _ = b.for_each_key(|k| {
-                dump_node(fs, &mut devs, k, btree_node_size);
+        node_iter
+            .for_each(&trans, |b| {
+                let _ = b.for_each_key(|k| {
+                    dump_node(fs, &mut devs, k, btree_node_size);
+                    ControlFlow::Continue(())
+                });
                 ControlFlow::Continue(())
-            });
-            ControlFlow::Continue(())
-        }).map_err(|e| anyhow!("error walking btree {}: {}",
-            accounting::btree_id_str(id), e))?;
+            })
+            .map_err(|e| {
+                anyhow!(
+                    "error walking btree {}: {}",
+                    accounting::btree_id_str(id),
+                    e
+                )
+            })?;
 
         // Also dump the root node itself
         if let Some(b) = fs.btree_id_root(id) {
@@ -611,8 +653,16 @@ fn dump_fs(fs: &Fs, cli: &DumpCli, sanitize: bool, sanitize_filenames: bool) -> 
             format!("{}.qcow2", cli.output)
         };
 
-        match write_dev_image(fs, ca, &path, cli.force, sanitize, sanitize_filenames,
-                              block_size, &mut devs[dev_idx as usize]) {
+        match write_dev_image(
+            fs,
+            ca,
+            &path,
+            cli.force,
+            sanitize,
+            sanitize_filenames,
+            block_size,
+            &mut devs[dev_idx as usize],
+        ) {
             Ok(()) => ControlFlow::Continue(()),
             Err(e) => {
                 write_err = Some(e);
@@ -644,8 +694,16 @@ pub fn cmd_dump(argv: Vec<String>) -> Result<()> {
     opt_set!(opts, read_only, 1);
     opt_set!(opts, nochanges, 1);
     opt_set!(opts, norecovery, 1);
-    opt_set!(opts, degraded, c::bch_degraded_actions::BCH_DEGRADED_very as u8);
-    opt_set!(opts, errors, c::bch_error_actions::BCH_ON_ERROR_continue as u8);
+    opt_set!(
+        opts,
+        degraded,
+        c::bch_degraded_actions::BCH_DEGRADED_very as u8
+    );
+    opt_set!(
+        opts,
+        errors,
+        c::bch_error_actions::BCH_ON_ERROR_continue as u8
+    );
     opt_set!(opts, fix_errors, c::fsck_err_opts::FSCK_FIX_no as u8);
 
     if cli.noexcl {

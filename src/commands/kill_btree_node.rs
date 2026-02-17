@@ -22,9 +22,9 @@ use bch_bindgen::opt_set;
 use clap::Parser;
 
 struct KillNode {
-    btree:  c::btree_id,
-    level:  u32,
-    idx:    u64,
+    btree: c::btree_id,
+    level: u32,
+    idx:   u64,
 }
 
 /// Make btree nodes unreadable (debugging tool)
@@ -52,11 +52,13 @@ fn parse_kill_node(s: &str) -> Result<KillNode> {
         bail!("invalid node spec: {}", s);
     }
 
-    let btree: c::btree_id = parts[0].parse()
+    let btree: c::btree_id = parts[0]
+        .parse()
         .map_err(|_| anyhow!("invalid btree id: {}", parts[0]))?;
 
     let level = if parts.len() > 1 {
-        parts[1].parse::<u32>()
+        parts[1]
+            .parse::<u32>()
             .map_err(|_| anyhow!("invalid level: {}", parts[1]))?
     } else {
         0
@@ -67,7 +69,8 @@ fn parse_kill_node(s: &str) -> Result<KillNode> {
     }
 
     let idx = if parts.len() > 2 {
-        parts[2].parse::<u64>()
+        parts[2]
+            .parse::<u64>()
             .map_err(|_| anyhow!("invalid index: {}", parts[2]))?
     } else {
         0
@@ -83,7 +86,9 @@ pub fn cmd_kill_btree_node(argv: Vec<String>) -> Result<()> {
         bail!("no nodes specified (use -n btree:level:idx)");
     }
 
-    let mut kill_nodes: Vec<KillNode> = cli.nodes.iter()
+    let mut kill_nodes: Vec<KillNode> = cli
+        .nodes
+        .iter()
         .map(|s| parse_kill_node(s))
         .collect::<Result<Vec<_>>>()?;
 
@@ -99,7 +104,10 @@ pub fn cmd_kill_btree_node(argv: Vec<String>) -> Result<()> {
     let mut zeroes: *mut libc::c_void = std::ptr::null_mut();
     let r = unsafe { libc::posix_memalign(&mut zeroes, block_size, block_size) };
     if r != 0 {
-        bail!("posix_memalign failed: {}", std::io::Error::from_raw_os_error(r));
+        bail!(
+            "posix_memalign failed: {}",
+            std::io::Error::from_raw_os_error(r)
+        );
     }
     unsafe { std::ptr::write_bytes(zeroes as *mut u8, 0, block_size) };
 
@@ -140,22 +148,30 @@ pub fn cmd_kill_btree_node(argv: Vec<String>) -> Result<()> {
                     continue;
                 };
 
-                eprintln!("killing btree node on dev {} {} l={}\n  {}",
-                    dev, kill.btree, kill.level, k.to_text(&fs));
+                eprintln!(
+                    "killing btree node on dev {} {} l={}\n  {}",
+                    dev,
+                    kill.btree,
+                    kill.level,
+                    k.to_text(&fs)
+                );
 
                 let fd = unsafe { (*ca.disk_sb.bdev).bd_fd };
                 let offset = (ptr.offset() as i64) << 9;
-                let ret = unsafe {
-                    libc::pwrite(fd, zeroes, block_size, offset)
-                };
+                let ret = unsafe { libc::pwrite(fd, zeroes, block_size, offset) };
                 if ret as usize != block_size {
-                    eprintln!("pwrite error: expected {} got {} {}",
-                        block_size, ret, std::io::Error::last_os_error());
+                    eprintln!(
+                        "pwrite error: expected {} got {} {}",
+                        block_size,
+                        ret,
+                        std::io::Error::last_os_error()
+                    );
                 }
             }
 
             ControlFlow::Break(())
-        }).map_err(|e| anyhow!("error walking btree nodes: {}", e))?;
+        })
+        .map_err(|e| anyhow!("error walking btree nodes: {}", e))?;
 
         if !found {
             unsafe { libc::free(zeroes) };
