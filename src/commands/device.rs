@@ -391,10 +391,6 @@ pub fn cmd_device_resize(argv: Vec<String>) -> Result<()> {
             let usage = handle.dev_usage(dev_idx).context("querying device usage")?;
             let nbuckets = size_sectors / usage.bucket_size as u64;
 
-            if nbuckets < usage.nr_buckets {
-                return Err(anyhow!("Shrinking not supported yet"));
-            }
-
             println!("resizing {} to {} buckets", cli.device, nbuckets);
             handle
                 .disk_resize(dev_idx, nbuckets)
@@ -447,7 +443,7 @@ fn resize_offline(device: &str, size_sectors: u64) -> Result<()> {
 
     if nbuckets < ca.mi.nbuckets {
         bail!(
-            "shrinking not supported (requested {} buckets, have {})",
+            "offline shrinking not yet supported (requested {} buckets, have {})",
             nbuckets,
             ca.mi.nbuckets
         );
