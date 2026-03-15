@@ -473,7 +473,11 @@ enum bch_bkey_type_flags {
 	  "Whiteout specific to the extents btree, blocking "		\
 	  "visibility of ancestor snapshot extent versions")		\
 	x(logged_op_stripe_update, 37,	BKEY_TYPE_strict_btree_checks,	\
-	  "Logged stripe creation/update operation for crash recovery")
+	  "Logged stripe creation/update operation for crash recovery")	\
+	x(damage,		38,	BKEY_TYPE_strict_btree_checks,	\
+	  "Errors that damaged an inode, recorded in the same "		\
+	  "transaction as the repair that did the damage: a sorted "	\
+	  "list of bch_sb_error_id")
 
 enum bch_bkey_type {
 #define x(name, nr, ...) KEY_TYPE_##name	= nr,
@@ -500,11 +504,38 @@ struct bch_error {
 	u8			pad[7];
 };
 
-#define KEY_TYPE_ERRORS()			\
-	x(unknown,			0)	\
-	x(device_removed,		1)	\
-	x(double_allocation,		2)	\
-	x(no_valid_pointers_repair,	3)
+/*
+ * Why an extent became a KEY_TYPE_error key, recorded in the tombstone so a
+ * later reader can tell what killed the data without the damage btree, which
+ * fsck can prune.
+ *
+ * The decompress_ reasons are the data_decompress_err_ list in
+ * sb/errors_format.h, name for name: the superblock counts how often a
+ * decompression failed each way, and the key says which of those killed this
+ * extent. bch2_decompress_key_type_error() maps between them off the same
+ * table that produces the sb error ids, so the two can't drift - adding a
+ * decompress error id without a reason here breaks the build.
+ */
+#define KEY_TYPE_ERRORS()					\
+	x(unknown,					0)	\
+	x(device_removed,				1)	\
+	x(double_allocation,				2)	\
+	x(no_valid_pointers_repair,			3)	\
+	x(decompress_exceeded_max_encoded_extent,	4)	\
+	x(decompress_lz4_old,				5)	\
+	x(decompress_lz4,				6)	\
+	x(decompress_gzip,				7)	\
+	x(decompress_gzip_size_mismatch,		8)	\
+	x(decompress_zstd_src_len_bad,			9)	\
+	x(decompress_zstd_size_mismatch,		10)	\
+	x(decompress_zstd_corruption_detected,		11)	\
+	x(decompress_zstd_checksum_wrong,		12)	\
+	x(decompress_zstd_prefix_unknown,		13)	\
+	x(decompress_zstd_src_size_wrong,		14)	\
+	x(decompress_zstd_dst_size_too_small,		15)	\
+	x(decompress_zstd_memory_allocation,		16)	\
+	x(decompress_zstd_unknown,			17)	\
+	x(decompress_unknown,				18)
 
 enum bch_key_type_errors {
 #define x(n, t)	KEY_TYPE_ERROR_##n = t,
@@ -542,6 +573,23 @@ struct bch_backpointer {
 	struct bpos		pos;
 } __packed __aligned(8);
 
+/*
+ * Denormalized cache of "is this bp's extent listed in reconcile_phys?":
+ *
+ * fsck needs to check that the reconcile_phys btrees agree with the extents
+ * btree, but a direct reconcile_phys <-> extents check would be expensive:
+ * for every reconcile_phys entry (keyed by bucket position), we'd have to do
+ * a random lookup against the extents btree. Instead, mirror the work_id into
+ * the backpointer so fsck can do two cheap pairwise checks:
+ *
+ *   - reconcile_phys <-> backpointers: both keyed by bucket position, indexed
+ *   - backpointers   <-> extents:	already required for backpointer fsck
+ *
+ * Invariant: when bp.flags PHYS != 0, reconcile_phys[PHYS] must have an entry
+ * at bp.k.p, and the extent must carry a bch_extent_reconcile entry whose
+ * rb_work_id_phys() equals PHYS. Every path that mutates reconcile_opts on an
+ * extent must keep the bp's PHYS flag in sync.
+ */
 BITMASK(BACKPOINTER_RECONCILE_PHYS,	struct bch_backpointer, flags, 0, 2);
 BITMASK(BACKPOINTER_ERASURE_CODED,	struct bch_backpointer, flags, 2, 3);
 BITMASK(BACKPOINTER_STRIPE_PTR,		struct bch_backpointer, flags, 3, 4);
@@ -596,7 +644,10 @@ struct bch_sb_field {
 	  "Tracks which recovery passes have been run "			\
 	  "successfully")						\
 	x(extent_type_u64s,	16,						\
-	  "Per-extent-type size limits")
+	  "Per-extent-type size limits")				\
+	x(errors_v2,		17,						\
+	  "Persistent error log, v2: adds the time of "			\
+	  "first occurrence to each entry")
 
 enum btree_id_flags {
 	BTREE_IS_extents	= BIT(0),
@@ -742,6 +793,11 @@ enum btree_id_flags {
 	  BTREE_IS_write_buffer,						\
 	  BIT_ULL(KEY_TYPE_backpointer),					\
 	  "Stripe backpointers")					\
+	x(damage,		28,						\
+	  BTREE_IS_snapshots,						\
+	  BIT_ULL(KEY_TYPE_whiteout)|						\
+	  BIT_ULL(KEY_TYPE_damage),						\
+	  "Inodes damaged by errors and repairs")				\
 
 enum btree_id {
 #define x(name, nr, ...) BTREE_ID_##name = nr,
@@ -764,6 +820,7 @@ enum btree_id {
 #include "fs/logged_ops_format.h"
 #include "fs/quota_format.h"
 #include "fs/xattr_format.h"
+#include "init/damage_format.h"
 #include "init/passes_format.h"
 #include "journal/seq_blacklist_format.h"
 #include "sb/counters_format.h"
@@ -884,12 +941,30 @@ struct bch_sb_field_ext {
 	__le64			errors_silent[8];
 	__le64			btrees_lost_data;
 	__le64			flags0;
+	/*
+	 * Like btrees_lost_data, but never cleared - btrees_lost_data gates
+	 * reconstruction and is cleared when repair completes; this is the
+	 * forensic record of every btree that has ever lost data:
+	 */
+	__le64			btrees_lost_data_ever;
+	/*
+	 * Btrees validated consistent by their check pass and not mutated
+	 * since. Written synchronously on every change (set on clean pass
+	 * completion, cleared from the btree's transactional trigger on
+	 * mutation) so the on-disk value is always current. Lets consistency
+	 * checks that would otherwise destroy data based on an in-memory table
+	 * they can't fully trust (check_key_has_snapshot) instead reschedule
+	 * the check pass. Runtime copy: bch_sb.btrees_clean.
+	 */
+	__le64			btrees_clean;
 };
 
 LE64_BITMASK(BCH_SB_EXT_DEV_READAHEAD,		struct bch_sb_field_ext, flags0, 0, 20);
 LE64_BITMASK(BCH_SB_EXT_EC_STRIPE_BUF_LIMIT,	struct bch_sb_field_ext, flags0, 20, 26);
 LE64_BITMASK(BCH_SB_EXT_SCRUB_MAX_REWIND_SECS,	struct bch_sb_field_ext, flags0, 26, 38);
 LE64_BITMASK(BCH_SB_EXT_DISCARD_BUFFER,		struct bch_sb_field_ext, flags0, 38, 42);
+LE64_BITMASK(BCH_SB_EXT_BTREE_CACHE_SHRINKER_SEEKS,
+						struct bch_sb_field_ext, flags0, 42, 49);
 
 /* Superblock: */
 
@@ -1052,6 +1127,12 @@ LE64_BITMASK(BCH_SB_EXT_DISCARD_BUFFER,		struct bch_sb_field_ext, flags0, 38, 42
 	x(need_discard_by_journal_seq,	BCH_VERSION(1, 38),			\
 	  "need_discard btree reindexed by journal seq for O(1) "		\
 	  "discard eligibility checks",				"2026-03")	\
+	x(per_dev_fragmentation_lru,	BCH_VERSION(1, 39),			\
+	  "Per-device bucket fragmentation LRUs, so copygc can reason "		\
+	  "about fragmentation per device",			"2026-07")	\
+	x(snapshot_nr_keys,		BCH_VERSION(1, 40),			\
+	  "Per-snapshot key-count accounting, so snapshot deletion can tell "	\
+	  "an empty node from one whose keys would be stranded",	"2026-07")
 
 enum bcachefs_metadata_version {
 	bcachefs_metadata_version_min = 9,
@@ -1228,6 +1309,14 @@ LE64_BITMASK(BCH_SB_REBALANCE_AC_ONLY,	struct bch_sb, flags[6], 23, 24);
 LE64_BITMASK(BCH_SB_WRITEBACK_TIMEOUT,	struct bch_sb, flags[6], 24, 40);
 LE64_BITMASK(BCH_SB_EXTENT_BP_SHIFT,	struct bch_sb, flags[6], 40, 48);
 LE64_BITMASK(BCH_SB_SCRUB_JOURNAL,	struct bch_sb, flags[6], 48, 50);
+LE64_BITMASK(BCH_SB_EC_MAX_DATA_BLOCKS,	struct bch_sb, flags[6], 50, 58);
+LE64_BITMASK(BCH_SB_MOVE_WRITES_FUA,	struct bch_sb, flags[6], 58, 59);
+/*
+ * Set by `bcachefs dump --sanitize` when it scrubs dirent names: the names
+ * (and therefore their str_hash positions) are meaningless, so fsck must skip
+ * the dirent hash-consistency check rather than "repair" the artifacts.
+ */
+LE64_BITMASK(BCH_SB_DIRENTS_SANITIZED,	struct bch_sb, flags[6], 59, 60);
 
 #define BCH_SB_EXTENT_BP_SHIFT_DEFAULT	10
 
@@ -1803,7 +1892,7 @@ static inline bool btree_id_recovers_from_scan(enum btree_id btree)
 	return btree == BTREE_ID_alloc || !btree_id_can_reconstruct(btree);
 }
 
-#define BTREE_MAX_DEPTH		4U
+enum { BTREE_MAX_DEPTH = 4 };
 
 /* Btree nodes */
 

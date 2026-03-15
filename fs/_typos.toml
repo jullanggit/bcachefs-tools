@@ -1,0 +1,10 @@
+[default.extend-words]
+thr = "thr"
+opf = "opf"
+nd = "nd"
+filp = "filp"
+cleanp = "cleanp"
+iput = "iput"
+WHT = "WHT"
+PARM = "PARM"
+EXPORTFS = "EXPORTFS"

@@ -64,9 +64,6 @@
 	x(EIO,				blockdev_io_error)			\
 	BLK_ERRS()								\
 	x(BCH_ERR_blockdev_io_error,	BLK_STS_UNKNOWN)			\
-	x(EIO,				zstd_error)				\
-	ZSTD_ERRS()								\
-	x(BCH_ERR_zstd_error,		ZSTD_error_unknown)			\
 	x(ERANGE,			ERANGE_option_too_small)		\
 	x(ERANGE,			ERANGE_option_too_big)			\
 	x(ERANGE,			projid_too_big)				\
@@ -108,6 +105,7 @@
 	x(ENOMEM,			ENOMEM_journal_entry_add)		\
 	x(ENOMEM,			ENOMEM_journal_read_buf_realloc)	\
 	x(ENOMEM,			ENOMEM_btree_interior_update_worker_init)\
+	x(ENOMEM,			ENOMEM_btree_node_rewrites_table_init)	\
 	x(ENOMEM,			ENOMEM_btree_interior_update_pool_init)	\
 	x(ENOMEM,			ENOMEM_bio_read_init)			\
 	x(ENOMEM,			ENOMEM_bio_read_split_init)		\
@@ -115,6 +113,7 @@
 	x(ENOMEM,			ENOMEM_promote_limit_init)		\
 	x(ENOMEM,			ENOMEM_bio_bounce_pages_init)		\
 	x(ENOMEM,			ENOMEM_writepage_bioset_init)		\
+	x(ENOMEM,			ENOMEM_writepage_buf_pool_init)		\
 	x(ENOMEM,			ENOMEM_dio_read_bioset_init)		\
 	x(ENOMEM,			ENOMEM_dio_write_bioset_init)		\
 	x(ENOMEM,			ENOMEM_nocow_flush_bioset_init)		\
@@ -155,6 +154,7 @@
 	x(ENOMEM,                       ENOMEM_journal_read_bucket)             \
 	x(ENOMEM,                       ENOMEM_acl)				\
 	x(ENOMEM,                       ENOMEM_move_extent)			\
+	x(ENOMEM,			ENOMEM_reconcile_scan_in_flight)	\
 	x(ENOSPC,			ENOSPC_disk_reservation)		\
 	x(ENOSPC,			ENOSPC_bucket_alloc)			\
 	x(ENOSPC,			ENOSPC_disk_label_add)			\
@@ -183,6 +183,7 @@
 	x(ENOENT,			ENOENT_not_directory)			\
 	x(ENOENT,			ENOENT_directory_dead)			\
 	x(ENOENT,			ENOENT_subvolume)			\
+	x(ENOENT,			ENOENT_subvolume_deleted)		\
 	x(ENOENT,			ENOENT_snapshot)			\
 	x(ENOENT,			ENOENT_snapshot_tree)			\
 	x(ENOENT,			ENOENT_dirent_doesnt_match_inode)	\
@@ -201,8 +202,10 @@
 	x(EAGAIN,			freelist_empty)				\
 	x(EAGAIN,			stripe_needs_block_evacuate)		\
 	x(EAGAIN,			stripe_insufficient_devices)		\
+	x(EAGAIN,			max_discards_in_flight)			\
 	x(ENOSPC,			ec_alloc_failed)			\
 	x(BCH_ERR_freelist_empty,	no_buckets_found)			\
+	x(BCH_ERR_freelist_empty,	bucket_alloc_no_progress)		\
 	x(0,				transaction_restart)			\
 	x(BCH_ERR_transaction_restart,	transaction_restart_fault_inject)	\
 	x(BCH_ERR_transaction_restart,	transaction_restart_relock)		\
@@ -212,11 +215,13 @@
 	x(BCH_ERR_transaction_restart,	transaction_restart_lock_node_reused)	\
 	x(BCH_ERR_transaction_restart,	transaction_restart_fill_relock)	\
 	x(BCH_ERR_transaction_restart,	transaction_restart_fill_mem_alloc_fail)\
+	x(BCH_ERR_transaction_restart,	transaction_restart_lock_waitlist_alloc)\
 	x(BCH_ERR_transaction_restart,	transaction_restart_mem_realloced)	\
 	x(BCH_ERR_transaction_restart,	transaction_restart_in_traverse_all)	\
 	x(BCH_ERR_transaction_restart,	transaction_restart_would_deadlock)	\
 	x(BCH_ERR_transaction_restart,	transaction_restart_would_deadlock_write)\
 	x(BCH_ERR_transaction_restart,	transaction_restart_deadlock_recursion_limit)\
+	x(BCH_ERR_transaction_restart,	transaction_restart_deadlock_waitlist_alloc)\
 	x(BCH_ERR_transaction_restart,	transaction_restart_upgrade)		\
 	x(BCH_ERR_transaction_restart,	transaction_restart_key_cache_fill)	\
 	x(BCH_ERR_transaction_restart,	transaction_restart_key_cache_raced)	\
@@ -237,6 +242,8 @@
 	x(BCH_ERR_no_btree_node,	no_btree_node_init)			\
 	x(BCH_ERR_no_btree_node,	no_btree_node_cached)			\
 	x(BCH_ERR_no_btree_node,	no_btree_node_srcu_reset)		\
+	x(BCH_ERR_no_btree_node,	no_btree_node_nofill)			\
+	x(BCH_ERR_no_btree_node,	no_btree_node_reused)			\
 	x(0,				btree_insert_fail)			\
 	x(BCH_ERR_btree_insert_fail,	btree_insert_btree_node_full)		\
 	x(BCH_ERR_btree_insert_fail,	btree_insert_need_mark_replicas)	\
@@ -273,6 +280,8 @@
 	x(BCH_ERR_data_update_fail,	data_update_fail_no_rw_devs)		\
 	x(BCH_ERR_data_update_fail,	data_update_fail_need_copygc)		\
 	x(EPERM,			reflink_p_may_update_options_unset)	\
+	x(EPERM,			EPERM_non_admin)			\
+	x(EPERM,			EPERM_non_admin_or_owner)		\
 	x(EINVAL,			device_state_not_allowed)		\
 	x(EINVAL,			member_info_missing)			\
 	x(EINVAL,			mismatched_block_size)			\
@@ -280,6 +289,7 @@
 	x(EINVAL,			bucket_size_too_small)			\
 	x(EINVAL,			device_size_too_small)			\
 	x(EINVAL,			device_size_too_big)			\
+	x(EINVAL,			device_already_resizing)		\
 	x(EINVAL,			device_not_a_member_of_filesystem)	\
 	x(EINVAL,			device_has_been_removed)		\
 	x(EINVAL,			device_splitbrain)			\
@@ -293,10 +303,13 @@
 	x(EINVAL,			opt_parse_error)			\
 	x(EINVAL,			remove_with_metadata_missing_unimplemented)\
 	x(EINVAL,			remove_would_lose_data)			\
+	x(EINVAL,			remove_by_backpointer_did_not_terminate)\
+	x(EINVAL,			remove_stripes_did_not_terminate)\
 	x(EINVAL,			no_resize_with_buckets_nouse)		\
 	x(EINVAL,			inode_unpack_error)			\
 	x(EINVAL,			inode_not_unlinked)			\
 	x(EINVAL,			inode_has_child_snapshot)		\
+	x(EINVAL,			inode_is_subvolume_root)		\
 	x(EINVAL,			varint_decode_error)			\
 	x(EINVAL,			erasure_coding_found_btree_node)	\
 	x(EINVAL,			erasure_coding_stripe_update_err)	\
@@ -365,6 +378,8 @@
 	x(EINVAL,			EINVAL_ioctl_dev_usage_bad_flags)		\
 	x(EINVAL,			EINVAL_ioctl_dev_usage_v2_not_started)		\
 	x(EINVAL,			EINVAL_ioctl_dev_usage_v2_bad_flags)		\
+	x(EINVAL,			EINVAL_ioctl_query_btree_keys_bad_flags)	\
+	x(EINVAL,			EINVAL_ioctl_query_btree_keys_bad_params)	\
 	x(EINVAL,			EINVAL_ioctl_read_super_bad_flags)		\
 	x(EINVAL,			EINVAL_ioctl_disk_get_idx_bad_dev)		\
 	x(EINVAL,			EINVAL_ioctl_disk_resize_bad_flags)		\
@@ -389,8 +404,13 @@
 	x(EINVAL,			EINVAL_snapshot_parent_already_has_children)	\
 	x(EINVAL,			EINVAL_snapshot_delete_has_two_children)	\
 	x(EINVAL,			EINVAL_snapshot_delete_interior_at_runtime)	\
+	x(EINVAL,			EINVAL_snapshot_delete_with_data)		\
+	x(EINVAL,			EINVAL_snapshot_delete_already_deleted)		\
+	x(EINVAL,			EINVAL_snapshot_delete_bad_subvol)		\
+	x(EINVAL,			EINVAL_snapshot_delete_bad_topology)		\
 	x(EINVAL,			EINVAL_snapshot_parent_missing_child_ptr)	\
 	x(EINVAL,			EINVAL_snapshot_child_bad_parent)		\
+	x(EINVAL,			EINVAL_snapshot_edge_to_missing_node)		\
 	x(EINVAL,			EINVAL_snapshot_bad_subvol_flag)		\
 	x(EINVAL,			EINVAL_opt_parse_uint_required)		\
 	x(EINVAL,			EINVAL_opt_parse_str_required)		\
@@ -400,6 +420,10 @@
 	x(EINVAL,			EINVAL_ioctl_query_counters_bad_flags)	\
 	x(EINVAL,			EINVAL_node_scan_no_nodes)		\
 	x(EINVAL,			EINVAL_node_scan_too_many_replicas)	\
+	x(EINVAL,			EINVAL_parse_btree_id)			\
+	x(EINVAL,			EINVAL_parse_bkey_type)			\
+	x(EINVAL,			EINVAL_parse_bpos)			\
+	x(EINVAL,			EINVAL_parse_bbpos)			\
 	x(BCH_ERR_topology_repair,	topology_repair_drop_this_node)		\
 	x(BCH_ERR_topology_repair,	topology_repair_drop_prev_node)		\
 	x(BCH_ERR_topology_repair,	topology_repair_did_fill_from_scan)	\
@@ -488,6 +512,7 @@
 	x(EIO,				sb_not_downgraded)			\
 	x(EIO,				btree_node_write_all_failed)		\
 	x(EIO,				btree_node_read_error)			\
+	x(EIO,				btree_root_error_unset)			\
 	x(EIO,				btree_need_topology_repair)		\
 	x(EIO,				bucket_ref_update)			\
 	x(EIO,				trigger_alloc)				\
@@ -511,21 +536,28 @@
 	x(EIO,				insufficient_journal_devices)		\
 	x(EIO,				device_offline)				\
 	x(EIO,				stripe_create_device_offline)		\
+	x(EROFS,			stripe_create_device_removing)		\
 	x(EIO,				EIO_fault_injected)			\
 	x(EIO,				ec_block_read)				\
 	x(EIO,				ec_block_write)				\
 	x(EIO,				recompute_checksum)			\
 	x(BCH_ERR_data_read_retry_avoid,decompress)				\
 	x(BCH_ERR_decompress,		decompress_exceeded_max_encoded_extent)	\
+	x(BCH_ERR_decompress,		decompress_lz4_old)			\
 	x(BCH_ERR_decompress,		decompress_lz4)				\
 	x(BCH_ERR_decompress,		decompress_gzip)			\
+	x(BCH_ERR_decompress,		decompress_gzip_size_mismatch)		\
 	x(BCH_ERR_decompress,		decompress_zstd_src_len_bad)		\
 	x(BCH_ERR_decompress,		decompress_zstd_size_mismatch)		\
+	x(BCH_ERR_decompress,		zstd_error)				\
+	ZSTD_ERRS()								\
+	x(BCH_ERR_zstd_error,		ZSTD_error_unknown)			\
 	x(EIO,				data_write)				\
 	x(BCH_ERR_data_write,		data_write_io)				\
 	x(BCH_ERR_data_write,		data_write_csum)			\
 	x(BCH_ERR_data_write,		data_write_invalid_ptr)			\
 	x(BCH_ERR_data_write,		data_write_misaligned)			\
+	x(BCH_ERR_data_write,		data_write_need_fresh_buckets)		\
 	x(EIO,				data_read)				\
 	x(BCH_ERR_data_read,		no_device_to_read_from)			\
 	x(BCH_ERR_data_read,		no_devices_valid)			\
@@ -555,13 +587,18 @@
 	x(BCH_ERR_nopromote,		nopromote_ratelimited)			\
 	x(BCH_ERR_nopromote,		nopromote_no_writes)			\
 	x(BCH_ERR_nopromote,		nopromote_enomem)			\
-	x(0,				invalid_snapshot_node)			\
+	x(0,				snapshot)			\
+	x(BCH_ERR_snapshot,		invalid_snapshot_node)			\
+	x(BCH_ERR_snapshot,		snapshot_multiple_descendents)		\
+	x(BCH_ERR_snapshot,		snapshot_lostfound_unreachable)		\
 	x(0,				option_needs_open_fs)			\
 	x(0,				remove_disk_accounting_entry)		\
 	x(0,				nocow_trylock_fail)			\
 	x(BCH_ERR_nocow_trylock_fail,	nocow_trylock_contended)		\
 	x(BCH_ERR_nocow_trylock_fail,	nocow_trylock_bucket_full)		\
-	x(EINTR,			recovery_cancelled)			\
+	x(EINTR,			cancelled)				\
+	x(BCH_ERR_cancelled,		recovery_cancelled)			\
+	x(BCH_ERR_cancelled,		kthread_cancelled)			\
 	x(0,				shutdown_with_errors)			\
 	x(BCH_ERR_shutdown_with_errors,	shutdown_with_errors_fixed)		\
 	x(BCH_ERR_shutdown_with_errors,	shutdown_with_errors_unfixed)		\
