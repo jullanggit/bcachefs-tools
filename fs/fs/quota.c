@@ -37,7 +37,7 @@ static int bch2_sb_quota_validate(struct bch_sb *sb, struct bch_sb_field *f,
 	return 0;
 }
 
-static void bch2_sb_quota_to_text(struct printbuf *out,
+static __cold void bch2_sb_quota_to_text(struct printbuf *out,
 				  struct bch_fs *c,
 				  struct bch_sb *sb,
 				  struct bch_sb_field *f)
@@ -66,7 +66,7 @@ const struct bch_sb_field_ops bch_sb_field_ops_quota = {
 };
 
 int bch2_quota_validate(struct bch_fs *c, struct bkey_s_c k,
-			struct bkey_validate_context from)
+			const struct bkey_validate_context *from)
 {
 	int ret = 0;
 
@@ -78,7 +78,7 @@ fsck_err:
 	return ret;
 }
 
-void bch2_quota_to_text(struct printbuf *out, struct bch_fs *c,
+__cold void bch2_quota_to_text(struct printbuf *out, struct bch_fs *c,
 			struct bkey_s_c k)
 {
 	struct bkey_s_c_quota dq = bkey_s_c_to_quota(k);
@@ -97,7 +97,7 @@ void bch2_quota_to_text(struct printbuf *out, struct bch_fs *c,
 #include <linux/fs.h>
 #include <linux/quota.h>
 
-static void qc_info_to_text(struct printbuf *out, struct qc_info *i)
+static __cold void qc_info_to_text(struct printbuf *out, struct qc_info *i)
 {
 	printbuf_tabstops_reset(out);
 	printbuf_tabstop_push(out, 20);
@@ -112,7 +112,7 @@ static void qc_info_to_text(struct printbuf *out, struct qc_info *i)
 	prt_printf(out, "i_rt_spc_warnlimit\t%u\n",	i->i_rt_spc_warnlimit);
 }
 
-static void qc_dqblk_to_text(struct printbuf *out, struct qc_dqblk *q)
+static __cold void qc_dqblk_to_text(struct printbuf *out, struct qc_dqblk *q)
 {
 	printbuf_tabstops_reset(out);
 	printbuf_tabstop_push(out, 20);
@@ -524,8 +524,7 @@ advance:
 
 int bch2_fs_quota_read(struct bch_fs *c)
 {
-	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
-		guard(mutex)(&c->sb_lock);
+	scoped_guard(mutex_noio, &c->sb_lock) {
 		struct bch_sb_field_quota *sb_quota = bch2_sb_get_or_create_quota(&c->disk_sb);
 		if (!sb_quota)
 			return bch_err_throw(c, ENOSPC_sb_quota);
@@ -568,8 +567,7 @@ static int bch2_quota_enable(struct super_block	*sb, unsigned uflags)
 	if (uflags & FS_QUOTA_PDQ_ENFD && !c->opts.prjquota)
 		return bch_err_throw(c, EINVAL_quota_enable_prjquota);
 
-	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
-	guard(mutex)(&c->sb_lock);
+	guard(mutex_noio)(&c->sb_lock);
 	sb_quota = bch2_sb_get_or_create_quota(&c->disk_sb);
 	if (!sb_quota) {
 		int ret = bch_err_throw(c, ENOSPC_sb_quota);
@@ -597,8 +595,7 @@ static int bch2_quota_disable(struct super_block *sb, unsigned uflags)
 	if (sb->s_flags & SB_RDONLY)
 		return -EROFS;
 
-	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
-	guard(mutex)(&c->sb_lock);
+	guard(mutex_noio)(&c->sb_lock);
 	if (uflags & FS_QUOTA_UDQ_ENFD)
 		SET_BCH_SB_USRQUOTA(c->disk_sb.sb, false);
 
@@ -708,8 +705,7 @@ static int bch2_quota_set_info(struct super_block *sb, int type,
 	    ~(QC_SPC_TIMER|QC_INO_TIMER|QC_SPC_WARNS|QC_INO_WARNS))
 		return bch_err_throw(c, EINVAL_quota_set_info_bad_field);
 
-	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
-	guard(mutex)(&c->sb_lock);
+	guard(mutex_noio)(&c->sb_lock);
 	sb_quota = bch2_sb_get_or_create_quota(&c->disk_sb);
 	if (!sb_quota) {
 		int ret = bch_err_throw(c, ENOSPC_sb_quota);

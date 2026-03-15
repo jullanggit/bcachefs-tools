@@ -33,10 +33,13 @@
 
 #define race_fault(...)			dynamic_fault("bcachefs:race")
 
+struct task_struct;
+
 #include <linux/backing-dev-defs.h>
 #include <linux/bug.h>
 #include <linux/bio.h>
 #include <linux/kobject.h>
+#include <linux/kthread.h>
 #include <linux/list.h>
 #include <linux/math64.h>
 #include <linux/mutex.h>
@@ -54,6 +57,14 @@
 #include <linux/zstd.h>
 #include <linux/unicode.h>
 
+/* WQ_PERCPU is 6.17+; before that, per-cpu was the unflagged default: */
+#ifdef __KERNEL__
+#include <linux/version.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,17,0)
+#define WQ_PERCPU	0
+#endif
+#endif
+
 #include "bcachefs_format.h"
 #include "errcode.h"
 #include "opts.h"
@@ -64,6 +75,7 @@
 #include "util/enumerated_ref_types.h"
 #include "util/fast_list.h"
 #include "util/fifo.h"
+#include "util/locking.h"
 #include "util/seqmutex.h"
 #include "util/time_stats.h"
 #include "util/thread_with_file_types.h"
@@ -251,10 +263,6 @@ do {									\
 		"Disables rewriting of btree nodes during mark and sweep")\
 	BCH_DEBUG_PARAM(btree_shrinker_disabled,			\
 		"Disables the shrinker callback for the btree node cache")\
-	BCH_DEBUG_PARAM(verify_btree_ondisk,				\
-		"Reread btree nodes at various points to verify the "	\
-		"mergesort in the read path against modifications "	\
-		"done in memory")					\
 	BCH_DEBUG_PARAM(backpointers_no_use_write_buffer,		\
 		"Don't use the write buffer for backpointers, enabling "\
 		"extra runtime checks")					\
@@ -334,6 +342,10 @@ BCH_DEBUG_PARAMS_ALL()
 	  "scan btree key cache for eviction")				\
 	x(btree_write_buffer_flush,					\
 	  "Flush btree write buffer to btree")				\
+	x(btree_write_buffer_flush_shard_sched_delay,			\
+	  "Per-shard: queued to start of execution (workqueue scheduling delay)") \
+	x(btree_write_buffer_flush_shard_work,				\
+	  "Per-shard: actual flush work duration (wb_flush_sorted_range)") \
 	x(btree_gc,							\
 	  "GC pass recalculating oldest generation numbers")		\
 	x(data_write,							\
@@ -367,13 +379,28 @@ BCH_DEBUG_PARAMS_ALL()
 	x(blocked_journal_low_on_pin,					\
 	  "Blocked: journal pins (dirty btree nodes, "			\
 	  "key cache entries) not flushed fast enough")			\
+	x(blocked_journal_low_on_open_buckets,				\
+	  "Blocked: open buckets running low, throttling new "		\
+	  "journal work so reclaim can free them")			\
 	x(blocked_journal_max_in_flight,				\
 	  "Blocked: too many journal writes in flight")			\
 	x(blocked_journal_max_open,					\
 	  "Blocked: too many journal entries open, "			\
 	  "not yet closed for writing")					\
-	x(blocked_journal_write_buffer_flush,				\
+	x(blocked_journal_blocked,					\
 	  "Blocked: waiting for write buffer flush")			\
+	x(blocked_journal_full,						\
+	  "Blocked: writer hit journal_full (no room in current "	\
+	  "entry, reclaim not keeping up)")				\
+	x(blocked_journal_pin_full,					\
+	  "Blocked: writer hit journal_pin_full (pin fifo full, "	\
+	  "btree node / key cache flushers not keeping up)")		\
+	x(blocked_journal_buf_enomem,					\
+	  "Blocked: writer hit journal_buf_enomem (preallocated "	\
+	  "data buffer not topped up)")					\
+	x(blocked_journal_stuck,					\
+	  "Blocked: writer hit journal_stuck (10s timeout fired "	\
+	  "in slowpath wait)")						\
 	x(blocked_key_cache_flush,					\
 	  "Blocked: waiting for key cache flush")			\
 	x(blocked_allocate,						\
@@ -418,6 +445,7 @@ struct io_count {
 	x(journal_read)					\
 	x(fs_journal_alloc)				\
 	x(fs_resize_on_mount)				\
+	x(fs_mi_field_upgrades)				\
 	x(sb_journal_sort)				\
 	x(btree_node_read)				\
 	x(btree_node_read_all_replicas)			\
@@ -441,7 +469,6 @@ enum bch_dev_read_ref {
 	x(journal_write)				\
 	x(journal_discard)				\
 	x(discard_bucket)				\
-	x(discard_sectors_to_release)			\
 	x(discard_one_bucket_fast)			\
 	x(do_invalidates)				\
 	x(stripe_update_extents)			\
@@ -473,11 +500,32 @@ struct bch_dev {
 	struct percpu_ref	ref;
 #endif
 	struct completion	ref_completion;
+	/*
+	 * ref_outer keeps the bch_dev allocation alive - nothing more.
+	 * Unlike ca->ref, holding it does NOT mean the device is still a
+	 * member of the filesystem.
+	 *
+	 * ca->ref drains inside the device removal protocol, under
+	 * state_lock - so a ca->ref holder must never block on state_lock.
+	 * Contexts that do block on state_lock with a device in hand (work
+	 * items, ioctl lookups) hold ref_outer instead, and recheck
+	 * ca->removing under the lock before touching member state.
+	 */
+	refcount_t		ref_outer;
+	struct completion	ref_outer_completion;
 	struct enumerated_ref	io_ref[2];
 
 	struct bch_fs		*fs;
 
 	u8			dev_idx;
+	/*
+	 * Device is being removed and its alloc info and stripe pointers are
+	 * about to be deleted: new references must not be created. Checked by
+	 * __ec_stripe_create(), which may hold pre-invalidation copies of
+	 * stripe pointers; set by bch2_dev_remove() before the data drop,
+	 * cleared if removal fails.
+	 */
+	bool			removing;
 	/*
 	 * Cached version of this device's member info from superblock
 	 * Committed by bch2_write_super() -> bch_fs_mi_update()
@@ -494,7 +542,6 @@ struct bch_dev {
 	struct bch_sb		*sb_read_scratch;
 	int			sb_write_error;
 	dev_t			dev;
-	atomic_t		flush_seq;
 
 	struct bch_devs_mask	self;
 
@@ -517,14 +564,33 @@ struct bch_dev {
 	/* Allocator: */
 	u64			alloc_cursor[3];
 
+	/*
+	 * Incremented by bch2_alloc_wake_dev() at every site that wakes
+	 * freelist_wait for a specific device. Waiters on
+	 * c->allocator.freelist_wait snapshot the counters for the devices
+	 * they need at park time and compare on wake: if none have advanced,
+	 * the wake didn't concern this waiter and it re-parks without the
+	 * full alloc retry. Fs-wide wakes bump allocator.wake_all_counter
+	 * instead (see bch2_alloc_wake_all()).
+	 */
+	atomic_t		alloc_wake_counter;
+
 	unsigned		nr_open_buckets;
 	unsigned		nr_partial_buckets;
 	unsigned		nr_btree_reserve;
 
+	atomic64_t		shrinking_tail_free;
+
 	struct work_struct	invalidate_work;
+	spinlock_t		resize_lock;
+	u64			resize_seq;
+	wait_queue_head_t	resize_wait;
+	int			resize_status;
+	struct task_struct	*resize_thread;
 
 	struct work_struct	discard_fast_work;
 	darray_u64		discard_fast;
+	struct mutex		discard_fast_lock;
 
 	atomic64_t		rebalance_work;
 
@@ -568,9 +634,9 @@ struct bch_dev {
 	x(write_disable_complete)	\
 	x(clean_shutdown)		\
 	x(in_recovery)			\
+	x(running_recovery_passes)	\
 	x(in_fsck)			\
 	x(initial_gc_unfixed)		\
-	x(need_delete_dead_snapshots)	\
 	x(error)			\
 	x(topology_error)		\
 	x(errors_fixed)			\
@@ -617,8 +683,8 @@ struct journal_seq_blacklist_table {
 	x(discard_fast)							\
 	x(check_discard_freespace_key)					\
 	x(invalidate)							\
-	x(delete_dead_snapshots)					\
 	x(gc_gens)							\
+	x(presplit_shard_boundaries)					\
 	x(snapshot_delete_pagecache)					\
 	x(sysfs)							\
 	x(btree_write_buffer)						\
@@ -690,11 +756,18 @@ struct bch_fs {
 	struct bch_sb_cpu	sb;
 	struct bch_sb_handle	disk_sb;
 	struct closure		sb_write;
-	struct mutex		sb_lock;
+	struct mutex_noio	sb_lock;
 	unsigned long		incompat_versions_requested[BITS_TO_LONGS(BCH_VERSION_MINOR(bcachefs_metadata_version_current))];
 	struct unicode_map	*cf_encoding;
 
 	unsigned short		block_bits;	/* ilog2(block_size) */
+
+	/*
+	 * shard → preferred CPU mapping for wake_cpu hinting from
+	 * bch2_trans_begin(): each shard's worth of btree-node working set
+	 * gravitates to a fixed CPU's L1/L2.
+	 */
+	u16			inode_shard_cpu[256];
 
 	struct delayed_work	maybe_schedule_btree_bitmap_gc;
 
@@ -795,22 +868,29 @@ struct bch_fs {
 	struct dentry		*async_obj_dir;
 	struct btree_debug	btree_debug[BTREE_ID_NR];
 #endif
-	struct btree		*verify_data;
-	struct btree_node	*verify_ondisk;
-	struct mutex		verify_lock;
 };
 
 /* Error tracking: */
 
-static inline int __bch2_err_throw(struct bch_fs *c, int err)
-{
-	BUG_ON(err >= 0);
-	this_cpu_inc(c->counters.now[BCH_COUNTER_error_throw]);
-	trace_error_throw(c, bch2_err_str(err));
-	return err;
-}
+int __bch2_err_throw(struct bch_fs *, int);
 
 #define bch_err_throw(_c, _err) __bch2_err_throw(_c, -BCH_ERR_##_err)
+
+/*
+ * Have we been told to stop? For long-running kthread work, so the check can be
+ * try()d where it belongs instead of open coded:
+ *
+ *	try(bch2_kthread_cancelled(c));
+ *
+ * Returns 0 outside a kthread, so paths shared with user context are unaffected.
+ */
+static inline int bch2_kthread_cancelled(struct bch_fs *c)
+{
+	if ((current->flags & PF_KTHREAD) && kthread_should_stop())
+		return bch_err_throw(c, kthread_cancelled);
+
+	return 0;
+}
 
 /* Read-only refs: */
 
@@ -964,16 +1044,22 @@ struct bch_log_msg {
 
 static inline void bch2_log_msg_exit(struct bch_log_msg *msg)
 {
-	if (!msg->m.suppress)
+	if (!msg->m.suppress) {
+		/* elastic tabstops: align any raw \t/\r columns */
+		bch2_printbuf_tabstop_align(&msg->m);
 		bch2_print_str_loglevel(msg->c, msg->loglevel, msg->m.buf);
+	}
 	printbuf_exit(&msg->m);
 }
 
 static inline struct bch_log_msg bch2_log_msg_init(struct bch_fs *c,
 						   unsigned loglevel,
-						   bool suppress)
+						   bool suppress,
+						   bool atomic)
 {
 	struct printbuf buf = PRINTBUF;
+	buf.atomic = atomic;
+	buf.suppress = suppress;
 	bch2_log_msg_start(c, &buf);
 	return (struct bch_log_msg) {
 		.c		= c,
@@ -995,12 +1081,16 @@ enum kern_loglevels {
 
 DEFINE_CLASS(bch_log_msg, struct bch_log_msg,
 	     bch2_log_msg_exit(&_T),
-	     bch2_log_msg_init(c, LOGLEVEL_err, false),
+	     bch2_log_msg_init(c, LOGLEVEL_err, false, false),
 	     struct bch_fs *c)
 
 EXTEND_CLASS(bch_log_msg, _level,
-	     bch2_log_msg_init(c, loglevel, false),
+	     bch2_log_msg_init(c, loglevel, false, false),
 	     struct bch_fs *c, unsigned loglevel)
+
+EXTEND_CLASS(bch_log_msg, _atomic,
+	     bch2_log_msg_init(c, LOGLEVEL_err, false, true),
+	     struct bch_fs *c)
 
 /*
  * Open coded EXTEND_CLASS, because we need the constructor to be a macro for
@@ -1011,6 +1101,13 @@ typedef class_bch_log_msg_t class_bch_log_msg_ratelimited_t;
 
 static inline void class_bch_log_msg_ratelimited_destructor(class_bch_log_msg_t *p)
 { bch2_log_msg_exit(p); }
-#define class_bch_log_msg_ratelimited_constructor(_c)	bch2_log_msg_init(_c, 3, bch2_ratelimit(_c))
+
+/* btrees_clean: see bch_sb_field_ext.btrees_clean and bch2_set/clear_btree_clean() */
+static inline bool bch2_btree_is_clean(struct bch_fs *c, enum btree_id btree)
+{
+	return c->sb.btrees_clean & BIT_ULL(btree);
+}
+#define class_bch_log_msg_ratelimited_constructor(_c)		\
+	bch2_log_msg_init(_c, 3, bch2_ratelimit(_c), false)
 
 #endif /* _BCACHEFS_H */

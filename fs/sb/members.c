@@ -12,6 +12,7 @@
 #include "sb/members.h"
 #include "sb/io.h"
 
+#include "init/dev.h"
 #include "init/error.h"
 #include "init/passes.h"
 #include "init/progress.h"
@@ -46,10 +47,21 @@ int bch2_dev_missing_bkey(struct bch_fs *c, struct bkey_s_c k, unsigned dev)
 
 void bch2_dev_missing_atomic(struct bch_fs *c, unsigned dev)
 {
-	if (dev != BCH_SB_MEMBER_INVALID)
-		bch2_fs_inconsistent(c, "pointer to %s device %u",
-				     test_bit(dev, c->devs_removed.d)
-				     ? "removed" : "nonexistent", dev);
+	if (dev == BCH_SB_MEMBER_INVALID)
+		return;
+
+	CLASS(printbuf, buf)();
+	guard(printbuf_atomic)(&buf);
+
+	bch2_log_msg_start(c, &buf);
+
+	prt_printf(&buf, "pointer to %s device %u\n",
+		   test_bit(dev, c->devs_removed.d)
+		   ? "removed" : "nonexistent", dev);
+	bch2_prt_task_backtrace(&buf, current, 1, GFP_ATOMIC);
+
+	__bch2_inconsistent_error(c, &buf);
+	bch2_print_str(c, KERN_ERR, buf.buf);
 }
 
 void bch2_dev_bucket_missing(struct bch_dev *ca, u64 bucket)
@@ -162,30 +174,34 @@ static int validate_member(struct printbuf *err,
 			   struct bch_sb *sb,
 			   int i)
 {
-	if (le64_to_cpu(m.nbuckets) > BCH_MEMBER_NBUCKETS_MAX) {
+	u64 nbuckets = le64_to_cpu(m.nbuckets);
+
+	if (nbuckets > BCH_MEMBER_NBUCKETS_MAX) {
 		prt_printf(err, "device %u: too many buckets (got %llu, max %u)",
-			   i, le64_to_cpu(m.nbuckets), BCH_MEMBER_NBUCKETS_MAX);
+			   i, nbuckets, BCH_MEMBER_NBUCKETS_MAX);
 		return -BCH_ERR_invalid_sb_members;
 	}
 
-	if (le64_to_cpu(m.nbuckets) -
-	    le16_to_cpu(m.first_bucket) < BCH_MIN_NR_NBUCKETS) {
-		prt_printf(err, "device %u: not enough buckets (got %llu, max %u)",
-			   i, le64_to_cpu(m.nbuckets), BCH_MIN_NR_NBUCKETS);
+	u16 first_bucket = le16_to_cpu(m.first_bucket);
+
+	if (nbuckets - first_bucket < BCH_MIN_NR_NBUCKETS) {
+		prt_printf(err, "device %u: not enough buckets (got %llu, min %u)",
+			   i, nbuckets - first_bucket, BCH_MIN_NR_NBUCKETS);
 		return -BCH_ERR_invalid_sb_members;
 	}
 
-	if (le16_to_cpu(m.bucket_size) <
-	    le16_to_cpu(sb->block_size)) {
+	u16 bucket_size = le16_to_cpu(m.bucket_size);
+	u16 block_size = le16_to_cpu(sb->block_size);
+
+	if (bucket_size < block_size) {
 		prt_printf(err, "device %u: bucket size %u smaller than block size %u",
-			   i, le16_to_cpu(m.bucket_size), le16_to_cpu(sb->block_size));
+			   i, bucket_size, block_size);
 		return -BCH_ERR_invalid_sb_members;
 	}
 
-	if (le16_to_cpu(m.bucket_size) <
-	    BCH_SB_BTREE_NODE_SIZE(sb)) {
+	if (bucket_size < BCH_SB_BTREE_NODE_SIZE(sb)) {
 		prt_printf(err, "device %u: bucket size %u smaller than btree node size %llu",
-			   i, le16_to_cpu(m.bucket_size), BCH_SB_BTREE_NODE_SIZE(sb));
+			   i, bucket_size, BCH_SB_BTREE_NODE_SIZE(sb));
 		return -BCH_ERR_invalid_sb_members;
 	}
 
@@ -200,10 +216,33 @@ static int validate_member(struct printbuf *err,
 		return -BCH_ERR_invalid_sb_members;
 	}
 
+	u64 target_nbuckets = le64_to_cpu(m.target_nbuckets);
+
+	if (target_nbuckets) {
+		if (target_nbuckets < first_bucket) {
+			prt_printf(err, "device %u: target buckets starts before first bucket (got %llu, first %u)",
+				   i, target_nbuckets, first_bucket);
+			return -BCH_ERR_invalid_sb_members;
+		}
+
+		if (target_nbuckets < nbuckets &&
+		    target_nbuckets - first_bucket < BCH_MIN_NR_NBUCKETS) {
+			prt_printf(err, "device %u: not enough target buckets (got %llu, min %u)",
+				   i, target_nbuckets - first_bucket, BCH_MIN_NR_NBUCKETS);
+			return -BCH_ERR_invalid_sb_members;
+		}
+
+		if (target_nbuckets > BCH_MEMBER_NBUCKETS_MAX) {
+			prt_printf(err, "device %u: target buckets too big (got %llu, max %u)",
+				   i, target_nbuckets, BCH_MEMBER_NBUCKETS_MAX);
+			return -BCH_ERR_invalid_sb_members;
+		}
+	}
+
 	return 0;
 }
 
-void bch2_member_to_text(struct printbuf *out,
+__cold void bch2_member_to_text(struct printbuf *out,
 			 struct bch_member *m,
 			 struct bch_sb_field_disk_groups *gi,
 			 struct bch_sb *sb,
@@ -211,6 +250,7 @@ void bch2_member_to_text(struct printbuf *out,
 {
 	u64 bucket_size = le16_to_cpu(m->bucket_size);
 	u64 device_size = le64_to_cpu(m->nbuckets) * bucket_size;
+	u64 target_device_size = le64_to_cpu(m->target_nbuckets) * bucket_size;
 
 	prt_printf(out, "Label:\t");
 	if (BCH_MEMBER_GROUP(m))
@@ -220,12 +260,24 @@ void bch2_member_to_text(struct printbuf *out,
 		prt_printf(out, "(none)");
 	prt_newline(out);
 
+	if (m->failure_domain[0])
+		prt_printf(out, "Failure domain:\t%.*s\n",
+			   (int) sizeof(m->failure_domain), m->failure_domain);
+
 	prt_printf(out, "UUID:\t");
 	pr_uuid(out, m->uuid.b);
 	prt_newline(out);
 
 	prt_printf(out, "Size:\t");
 	prt_units_u64(out, device_size << 9);
+	prt_newline(out);
+
+	prt_printf(out, "Target size:\t");
+	if (target_device_size) {
+		prt_units_u64(out, target_device_size << 9);
+	} else {
+		prt_printf(out, "Inactive");
+	}
 	prt_newline(out);
 
 	for (unsigned i = 0; i < BCH_MEMBER_ERROR_NR; i++)
@@ -240,6 +292,14 @@ void bch2_member_to_text(struct printbuf *out,
 
 	prt_printf(out, "First bucket:\t%u\n", le16_to_cpu(m->first_bucket));
 	prt_printf(out, "Buckets:\t%llu\n", le64_to_cpu(m->nbuckets));
+
+	prt_printf(out, "Target buckets:\t");
+	if (target_device_size) {
+		prt_printf(out, "%llu", le64_to_cpu(m->target_nbuckets));
+	} else {
+		prt_printf(out, "Inactive");
+	}
+	prt_newline(out);
 
 	prt_printf(out, "Last mount:\t");
 	if (m->last_mount)
@@ -313,6 +373,10 @@ static void bch2_member_to_text_short_sb(struct printbuf *out,
 		prt_newline(out);
 	}
 
+	if (m->failure_domain[0])
+		prt_printf(out, "Failure domain:\t%.*s\n",
+			   (int) sizeof(m->failure_domain), m->failure_domain);
+
 	prt_printf(out, "Device:\t%.*s\n", (int) sizeof(m->device_name), m->device_name);
 	prt_printf(out, "Model:\t%.*s\n", (int) sizeof(m->device_model), m->device_model);
 	prt_printf(out, "Serial:\t%.*s\n", (int) sizeof(m->device_serial), m->device_serial);
@@ -331,9 +395,7 @@ static void bch2_member_to_text_short_sb(struct printbuf *out,
 	prt_newline(out);
 }
 
-static void bch2_member_to_text_short_locked(struct printbuf *out,
-			       struct bch_fs *c,
-			       struct bch_dev *ca)
+void bch2_member_to_text_short_locked(struct printbuf *out, struct bch_fs *c, struct bch_dev *ca)
 {
 	struct bch_member m = bch2_sb_member_get(c->disk_sb.sb, ca->dev_idx);
 	bch2_member_to_text_short_sb(out, &m,
@@ -346,8 +408,7 @@ void bch2_member_to_text_short(struct printbuf *out,
 			       struct bch_fs *c,
 			       struct bch_dev *ca)
 {
-	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
-	guard(mutex)(&c->sb_lock);
+	guard(mutex_noio)(&c->sb_lock);
 	bch2_member_to_text_short_locked(out, c, ca);
 }
 
@@ -359,7 +420,7 @@ void bch2_devs_mask_to_text_locked(struct printbuf *out, struct bch_fs *c,
 			bch2_member_to_text_short_locked(out, c, ca);
 }
 
-static void member_to_text(struct printbuf *out,
+static __cold void member_to_text(struct printbuf *out,
 			   struct bch_member m,
 			   struct bch_sb_field_disk_groups *gi,
 			   struct bch_sb *sb,
@@ -390,7 +451,7 @@ static int bch2_sb_members_v1_validate(struct bch_sb *sb, struct bch_sb_field *f
 	return 0;
 }
 
-static void bch2_sb_members_v1_to_text(struct printbuf *out,
+static __cold void bch2_sb_members_v1_to_text(struct printbuf *out,
 				       struct bch_fs *c,
 				       struct bch_sb *sb,
 				       struct bch_sb_field *f)
@@ -416,7 +477,7 @@ const struct bch_sb_field_ops bch_sb_field_ops_members_v1 = {
 	.to_text	= bch2_sb_members_v1_to_text,
 };
 
-static void bch2_sb_members_v2_to_text(struct printbuf *out,
+static __cold void bch2_sb_members_v2_to_text(struct printbuf *out,
 				       struct bch_fs *c,
 				       struct bch_sb *sb,
 				       struct bch_sb_field *f)
@@ -484,14 +545,52 @@ void bch2_sb_members_from_cpu(struct bch_fs *c)
 	}
 }
 
+struct failure_domain {
+	u8	name[32];
+};
+
 void bch2_sb_members_to_cpu(struct bch_fs *c)
 {
+	BUILD_BUG_ON(sizeof(((struct failure_domain *) NULL)->name) !=
+		     sizeof(((struct bch_member *) NULL)->failure_domain));
+
 	for_each_member_device(c, ca) {
 		struct bch_member m = bch2_sb_member_get(c->disk_sb.sb, ca->dev_idx);
 		ca->mi = bch2_mi_to_cpu(&m);
 
 		mod_bit(ca->dev_idx, c->devs_rotational.d, ca->mi.rotational);
 	}
+
+	/*
+	 * Intern failure domain strings to small ids: two devices are in the
+	 * same failure domain iff their (non-empty) strings match. The id is the
+	 * 1-based index into the set of distinct strings, 0 = unset. The table is
+	 * transient - the ids stored on ca->mi are what we keep.
+	 */
+	DARRAY(struct failure_domain) domains = {};
+	for_each_member_device(c, ca) {
+		struct bch_member m = bch2_sb_member_get(c->disk_sb.sb, ca->dev_idx);
+		if (!m.failure_domain[0])
+			continue;
+
+		u16 id = 0;
+		darray_for_each(domains, d)
+			if (!memcmp(d->name, m.failure_domain, sizeof(d->name))) {
+				id = (d - domains.data) + 1;
+				break;
+			}
+
+		if (!id) {
+			struct failure_domain d;
+			memcpy(d.name, m.failure_domain, sizeof(d.name));
+			if (darray_push(&domains, d))
+				continue;	/* -ENOMEM: leave unset, safe */
+			id = domains.nr;
+		}
+
+		ca->mi.failure_domain = id;
+	}
+	darray_exit(&domains);
 
 	struct bch_sb_field_members_v2 *mi2 = bch2_sb_field_get(c->disk_sb.sb, members_v2);
 	if (mi2)
@@ -502,15 +601,13 @@ void bch2_sb_members_to_cpu(struct bch_fs *c)
 		}
 }
 
-void bch2_dev_io_errors_to_text(struct printbuf *out, struct bch_dev *ca)
+__cold void bch2_dev_io_errors_to_text(struct printbuf *out, struct bch_dev *ca)
 {
 	struct bch_fs *c = ca->fs;
 	struct bch_member m;
 
-	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
-		guard(mutex)(&c->sb_lock);
+	scoped_guard(mutex_noio, &c->sb_lock)
 		m = bch2_sb_member_get(c->disk_sb.sb, ca->dev_idx);
-	}
 
 	printbuf_tabstop_push(out, 12);
 
@@ -540,8 +637,7 @@ void bch2_dev_errors_reset(struct bch_dev *ca)
 {
 	struct bch_fs *c = ca->fs;
 
-	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
-	guard(mutex)(&c->sb_lock);
+	guard(mutex_noio)(&c->sb_lock);
 
 	struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
 	for (unsigned i = 0; i < ARRAY_SIZE(m->errors_at_reset); i++)
@@ -627,7 +723,7 @@ static void __bch2_dev_btree_bitmap_mark(struct bch_dev *ca,
 
 void bch2_dev_btree_bitmap_mark_locked(struct bch_fs *c, struct bkey_s_c k, bool *write_sb)
 {
-	lockdep_assert_held(&c->sb_lock);
+	lockdep_assert_held(&c->sb_lock.lock);
 
 	struct bch_sb_field_members_v2 *mi = bch2_sb_field_get(c->disk_sb.sb, members_v2);
 
@@ -643,8 +739,7 @@ void bch2_dev_btree_bitmap_mark_locked(struct bch_fs *c, struct bkey_s_c k, bool
 
 void bch2_dev_btree_bitmap_mark(struct bch_fs *c, struct bkey_s_c k)
 {
-	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
-	guard(mutex)(&c->sb_lock);
+	guard(mutex_noio)(&c->sb_lock);
 	bool write_sb = false;
 	bch2_dev_btree_bitmap_mark_locked(c, k, &write_sb);
 	if (write_sb)
@@ -673,8 +768,7 @@ int bch2_btree_bitmap_gc(struct bch_fs *c)
 	struct progress_indicator progress;
 	bch2_progress_init(&progress, __func__, c, 0, ~0ULL);
 
-	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
-		guard(mutex)(&c->sb_lock);
+	scoped_guard(mutex_noio, &c->sb_lock) {
 		guard(rcu)();
 		for_each_member_device_rcu(c, ca, NULL)
 			ca->btree_allocated_bitmap_gc = 0;
@@ -699,8 +793,7 @@ int bch2_btree_bitmap_gc(struct bch_fs *c)
 
 	u64 sectors_marked_old = 0, sectors_marked_new = 0;
 
-	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
-		guard(mutex)(&c->sb_lock);
+	scoped_guard(mutex_noio, &c->sb_lock) {
 		struct bch_sb_field_members_v2 *mi = bch2_sb_field_get(c->disk_sb.sb, members_v2);
 
 		scoped_guard(rcu)
@@ -781,13 +874,30 @@ unsigned bch2_sb_nr_devices(const struct bch_sb *sb)
 	return nr;
 }
 
+/*
+ * Worst observed IO latency (@rw) across @devs, in jiffies - used to scale
+ * timeouts and "held too long" warnings so slow storage doesn't trip them.
+ */
+unsigned long bch2_dev_latency_max(struct bch_fs *c, struct bch_devs_mask *devs, int rw)
+{
+	u64 nsecs = 0;
+
+	guard(rcu)();
+	for_each_member_device_rcu(c, ca, devs)
+		nsecs = max(nsecs, ca->io_latency[rw].stats.max_duration);
+
+	return nsecs_to_jiffies(nsecs);
+}
+
 static int bch2_sb_member_find_slot(struct bch_fs *c)
 {
 	int best = -1;
 	u64 best_last_mount = 0;
 	unsigned nr_deleted = 0;
 
-	if (c->sb.nr_devices < BCH_SB_MEMBERS_MAX)
+	/* The sentinel must never be allocated as a real device: */
+	if (c->sb.nr_devices < BCH_SB_MEMBERS_MAX &&
+	    c->sb.nr_devices != BCH_SB_MEMBER_INVALID)
 		return c->sb.nr_devices;
 
 	for (unsigned dev_idx = 0; dev_idx < BCH_SB_MEMBERS_MAX; dev_idx++) {
@@ -824,6 +934,8 @@ int bch2_sb_member_alloc(struct bch_fs *c)
 	if (dev_idx < 0)
 		return dev_idx;
 
+	EBUG_ON(dev_idx == BCH_SB_MEMBER_INVALID);
+
 	struct bch_sb_field_members_v2 *mi = bch2_sb_field_get(c->disk_sb.sb, members_v2);
 
 	unsigned nr_devices = max_t(unsigned, dev_idx + 1, c->sb.nr_devices);
@@ -840,8 +952,7 @@ int bch2_sb_member_alloc(struct bch_fs *c)
 
 void bch2_sb_members_clean_deleted(struct bch_fs *c)
 {
-	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
-	guard(mutex)(&c->sb_lock);
+	guard(mutex_noio)(&c->sb_lock);
 	bool write_sb = false;
 
 	for (unsigned i = 0; i < c->sb.nr_devices; i++) {
@@ -857,12 +968,48 @@ void bch2_sb_members_clean_deleted(struct bch_fs *c)
 		bch2_write_super(c);
 }
 
-void __bch2_dev_mi_field_upgrades(struct bch_fs *c, struct bch_dev *ca, bool *write_sb)
+static void dev_mi_update_str(void *dst, size_t dst_size, const char *src,
+			      bool *write_sb)
 {
+	u8 padded[sizeof(((struct bch_member *)NULL)->device_model)] = {};
+
+	if (!src[0])
+		return;
+
+	if (WARN_ON_ONCE(dst_size > sizeof(padded)))
+		return;
+
+	memcpy_and_pad(padded, dst_size, src, strnlen(src, dst_size), '\0');
+
+	if (memcmp(dst, padded, dst_size)) {
+		memcpy(dst, padded, dst_size);
+		*write_sb = true;
+	}
+}
+
+void bch2_dev_mi_field_read(struct bch_dev *ca, struct bch_dev_identity *identity)
+{
+	bch2_dev_read_identity(ca->disk_sb.bdev,
+			       identity->name, sizeof(identity->name),
+			       identity->model, sizeof(identity->model),
+			       identity->serial, sizeof(identity->serial));
+	identity->rotational = bdev_rot(ca->disk_sb.bdev);
+}
+
+void bch2_dev_mi_field_upgrades_locked(struct bch_fs *c, struct bch_dev *ca,
+				       const struct bch_dev_identity *identity,
+				       bool *write_sb)
+{
+	lockdep_assert_held(&c->sb_lock.lock);
+
 	struct bch_member *m = bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
 
+	dev_mi_update_str(m->device_name, sizeof(m->device_name), identity->name, write_sb);
+	dev_mi_update_str(m->device_model, sizeof(m->device_model), identity->model, write_sb);
+	dev_mi_update_str(m->device_serial, sizeof(m->device_serial), identity->serial, write_sb);
+
 	if (!BCH_MEMBER_ROTATIONAL_SET(m)) {
-		SET_BCH_MEMBER_ROTATIONAL(m, !bdev_nonrot(ca->disk_sb.bdev));
+		SET_BCH_MEMBER_ROTATIONAL(m, identity->rotational);
 		SET_BCH_MEMBER_ROTATIONAL_SET(m, true);
 		*write_sb = true;
 	}
@@ -872,11 +1019,13 @@ void bch2_dev_mi_field_upgrades(struct bch_dev *ca)
 {
 	struct bch_fs *c = ca->fs;
 
-	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
-	guard(mutex)(&c->sb_lock);
+	struct bch_dev_identity identity;
+	bch2_dev_mi_field_read(ca, &identity);
+
+	guard(mutex_noio)(&c->sb_lock);
 	bool write_sb = false;
 
-	__bch2_dev_mi_field_upgrades(c, ca, &write_sb);
+	bch2_dev_mi_field_upgrades_locked(c, ca, &identity, &write_sb);
 
 	if (write_sb)
 		bch2_write_super(c);
@@ -887,14 +1036,19 @@ void bch2_dev_mi_field_upgrades(struct bch_dev *ca)
  */
 void bch2_fs_mi_field_upgrades(struct bch_fs *c)
 {
-	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
-	guard(mutex)(&c->sb_lock);
 	bool write_sb = false;
 
-	scoped_guard(rcu)
-		for_each_online_member_rcu(c, ca)
-			__bch2_dev_mi_field_upgrades(c, ca, &write_sb);
+	for_each_online_member(c, ca, BCH_DEV_READ_REF_fs_mi_field_upgrades) {
+		struct bch_dev_identity identity;
 
-	if (write_sb)
+		bch2_dev_mi_field_read(ca, &identity);
+
+		guard(mutex_noio)(&c->sb_lock);
+		bch2_dev_mi_field_upgrades_locked(c, ca, &identity, &write_sb);
+	}
+
+	if (write_sb) {
+		guard(mutex_noio)(&c->sb_lock);
 		bch2_write_super(c);
+	}
 }

@@ -27,7 +27,7 @@
 static void bio_check_or_release(struct bio *bio, bool check_dirty)
 {
 	if (check_dirty) {
-		bio_check_pages_dirty(bio);
+		bch2_bio_check_pages_dirty(bio);
 	} else {
 		bio_release_pages(bio, false);
 		bio_put(bio);
@@ -138,26 +138,6 @@ static int __bch2_direct_IO_read(struct kiocb *req, struct iov_iter *iter,
 				       GFP_KERNEL,
 				       &c->bio_read);
 start:
-		bio->bi_opf		= REQ_OP_READ|REQ_SYNC;
-		bio->bi_iter.bi_sector	= offset >> 9;
-		bio->bi_private		= dio;
-
-		ret = bch2_bio_iov_iter_get_pages(bio, iter, 0);
-		if (ret < 0) {
-			/* XXX: fault inject this path */
-			to_rbio(bio)->ret = ret;
-			bio_endio(bio);
-			break;
-		}
-
-		offset += bio->bi_iter.bi_size;
-
-		if (dio->should_dirty)
-			bio_set_pages_dirty(bio);
-
-		if (iter->count)
-			closure_get(&dio->cl);
-
 		struct bch_read_bio *rbio =
 			rbio_init(bio,
 				  c,
@@ -167,8 +147,27 @@ start:
 				  : bch2_direct_IO_read_endio);
 
 		BUG_ON(rbio->_state);
-		rbio->err_report = err_report;
-		rbio->subvol = inode_inum(inode).subvol;
+		rbio->err_report		= err_report;
+		rbio->subvol			= inode_inum(inode).subvol;
+		rbio->bio.bi_opf		= REQ_OP_READ|REQ_SYNC;
+		rbio->bio.bi_iter.bi_sector	= offset >> 9;
+		rbio->bio.bi_private		= dio;
+
+		ret = bch2_bio_iov_iter_get_pages(&rbio->bio, iter, 0);
+		if (ret < 0) {
+			/* XXX: fault inject this path */
+			rbio->ret = ret;
+			bio_endio(&rbio->bio);
+			break;
+		}
+
+		offset += rbio->bio.bi_iter.bi_size;
+
+		if (dio->should_dirty)
+			bch2_bio_set_pages_dirty(&rbio->bio);
+
+		if (iter->count)
+			closure_get(&dio->cl);
 
 		CLASS(btree_trans, trans)(c);
 		bch2_read(trans, rbio, rbio->bio.bi_iter, inode_inum(inode),
@@ -264,8 +263,8 @@ retry:
 			break;
 
 		if (k.k->p.snapshot != snapshot ||
-		    nr_replicas > bch2_bkey_replicas(c, k) ||
-		    (!compressed && bch2_bkey_sectors_compressed(c, k)))
+		    nr_replicas > bch2_bkey_durability_safe(c, k).total ||
+		    (!compressed && bch2_bkey_durability_safe(c, k).sectors_compressed))
 			return false;
 	}
 err:
@@ -325,66 +324,18 @@ static noinline int bch2_dio_write_copy_iov(struct dio_write *dio)
 	return 0;
 }
 
-static CLOSURE_CALLBACK(bch2_dio_write_flush_done)
-{
-	closure_type(dio, struct dio_write, op.cl);
-	struct bch_fs *c = dio->op.c;
-
-	closure_debug_destroy(cl);
-
-	dio->op.error = bch2_journal_error(&c->journal);
-
-	bch2_dio_write_done(dio);
-}
-
-static noinline void bch2_dio_write_flush(struct dio_write *dio)
-{
-	struct bch_fs *c = dio->op.c;
-	struct bch_inode_unpacked inode;
-	int ret;
-
-	dio->flush = 0;
-
-	closure_init(&dio->op.cl, NULL);
-
-	if (!dio->op.error) {
-		ret = bch2_inode_find_by_inum(c, inode_inum(dio->inode), &inode);
-		if (ret) {
-			dio->op.error = ret;
-		} else {
-			bch2_journal_flush_seq_async(&c->journal, inode.bi_journal_seq,
-						     0, &dio->op.cl);
-			bch2_inode_flush_nocow_writes_async(c, dio->inode, &dio->op.cl);
-		}
-	}
-
-	if (dio->sync) {
-		closure_sync(&dio->op.cl);
-		closure_debug_destroy(&dio->op.cl);
-	} else {
-		continue_at(&dio->op.cl, bch2_dio_write_flush_done, NULL);
-	}
-}
-
 static __always_inline long bch2_dio_write_done(struct dio_write *dio)
 {
 	struct bch_fs *c = dio->op.c;
 	struct kiocb *req = dio->req;
 	struct bch_inode_info *inode = dio->inode;
 	bool sync = dio->sync;
-	long ret;
-
-	if (unlikely(dio->flush)) {
-		bch2_dio_write_flush(dio);
-		if (!sync)
-			return -EIOCBQUEUED;
-	}
 
 	bch2_pagecache_block_put(inode);
 
 	kfree(dio->iov);
 
-	ret = dio->op.error ?: ((long) dio->written << 9);
+	long ret = dio->op.error ?: ((long) dio->written << 9);
 	bio_put(&dio->op.wbio.bio);
 
 	enumerated_ref_put(&c->writes, BCH_WRITE_REF_dio_write);
@@ -505,12 +456,14 @@ static __always_inline long bch2_dio_write_loop(struct dio_write *dio)
 		dio->op.target		= dio->op.opts.foreground_target;
 		dio->op.write_point	= writepoint_hashed((unsigned long) current);
 		dio->op.nr_replicas	= dio->op.opts.data_replicas;
-		dio->op.subvol		= inode->ei_inum.subvol;
-		dio->op.pos		= POS(inode->v.i_ino, (u64) req->ki_pos >> 9);
+		dio->op.subvol		= inode_inum(inode).subvol;
+		dio->op.pos		= POS(inode_inum(inode).inum, (u64) req->ki_pos >> 9);
 		dio->op.devs_need_flush	= &inode->ei_devs_need_flush;
 
 		if (sync)
 			dio->op.flags |= BCH_WRITE_sync;
+		if (dio->flush)
+			dio->op.flags |= BCH_WRITE_flush;
 		dio->op.flags |= BCH_WRITE_check_enospc;
 
 		ret = bch2_quota_reservation_add(c, inode, &dio->quota_res,
