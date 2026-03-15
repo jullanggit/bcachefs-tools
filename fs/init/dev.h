@@ -14,6 +14,10 @@ void bch2_dev_unlink(struct bch_dev *);
 void bch2_dev_free(struct bch_dev *);
 void __bch2_dev_offline(struct bch_fs *, struct bch_dev *);
 int bch2_dev_sysfs_online(struct bch_fs *, struct bch_dev *);
+void bch2_dev_read_identity(struct block_device *bdev,
+			    char *name, size_t name_size,
+			    char *model, size_t model_size,
+			    char *serial, size_t serial_size);
 int bch2_dev_alloc(struct bch_fs *, unsigned);
 int bch2_dev_attach_bdev(struct bch_fs *, struct bch_sb_handle *, struct printbuf *);
 
@@ -27,11 +31,15 @@ int bch2_dev_set_state(struct bch_fs *, struct bch_dev *,
 		       enum bch_member_state, int,
 		       struct printbuf *);
 
+int bch2_dev_add_initialize(struct bch_fs *, struct bch_dev *);
+
 int bch2_dev_remove(struct bch_fs *, struct bch_dev *, int, struct printbuf *);
 int bch2_dev_add(struct bch_fs *, const char *, struct printbuf *);
 int bch2_dev_online(struct bch_fs *, const char *, struct printbuf *);
 int bch2_dev_offline(struct bch_fs *, struct bch_dev *, int, struct printbuf *);
 int bch2_dev_resize(struct bch_fs *, struct bch_dev *, u64, struct printbuf *);
+int bch2_dev_resize_resume(struct bch_fs *, struct bch_dev *, struct printbuf *);
+void bch2_dev_resize_threads_stop(struct bch_fs *);
 
 int __bch2_dev_resize_alloc(struct bch_dev *, u64, u64);
 
@@ -40,4 +48,3 @@ struct bch_dev *bch2_dev_lookup(struct bch_fs *, const char *);
 extern const struct blk_holder_ops bch2_sb_handle_bdev_ops;
 
 #endif /* _BCACHEFS_INIT_DEV_H */
-

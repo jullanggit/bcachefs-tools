@@ -81,6 +81,8 @@ enum opt_type {
 	BCH_OPT_STR,
 	BCH_OPT_BITFIELD,
 	BCH_OPT_FN,
+	/* A free-form string stored directly in a bch_member char[] field: */
+	BCH_OPT_STR_MEMBER,
 };
 
 struct bch_opt_fn {
@@ -136,13 +138,13 @@ enum fsck_err_opts {
 	x(block_size,			u16,				\
 	  OPT_FS|OPT_FORMAT|						\
 	  OPT_HUMAN_READABLE|OPT_MUST_BE_POW_2|OPT_SB_FIELD_SECTORS,	\
-	  OPT_UINT(512, 1U << 16),					\
+	  OPT_UINT(512, 1U << 15),					\
 	  BCH_SB_BLOCK_SIZE,		4 << 10,			\
 	  "size",	"Filesystem block size")			\
 	x(btree_node_size,		u32,				\
 	  OPT_FS|OPT_FORMAT|						\
 	  OPT_HUMAN_READABLE|OPT_MUST_BE_POW_2|OPT_SB_FIELD_SECTORS,	\
-	  OPT_UINT(512, 1U << 20),					\
+	  OPT_UINT(512, 1U << 19),					\
 	  BCH_SB_BTREE_NODE_SIZE,	256 << 10,			\
 	  "size",	"Btree node size, default 256k")		\
 	x(errors,			u8,				\
@@ -157,14 +159,14 @@ enum fsck_err_opts {
 	  NULL,		"Number of consecutive write errors allowed before kicking out a device")\
 	x(metadata_replicas,		u8,				\
 	  OPT_FS|OPT_FORMAT|OPT_MOUNT_OLD|OPT_RUNTIME,			\
-	  OPT_UINT(1, BCH_REPLICAS_MAX + 1),				\
+	  OPT_UINT(1, BCH_REPLICAS_MAX),				\
 	  BCH_SB_META_REPLICAS_WANT,	1,				\
 	  "#",		"Number of metadata replicas (journal and btree)")\
 	x(data_replicas,		u8,				\
 	  OPT_FS|OPT_INODE|OPT_FORMAT|OPT_MOUNT_OLD|OPT_RUNTIME,	\
-	  OPT_UINT(1, BCH_REPLICAS_MAX + 1),				\
+	  OPT_UINT(1, BCH_REPLICAS_MAX),				\
 	  BCH_SB_DATA_REPLICAS_WANT,	1,				\
-	  "#",		"Number of data replicas")			\
+	  "#",		"Number of data replicas (erasure coding currently caps this at 3, RAID6)")\
 	x(encoded_extent_max,		u32,				\
 	  OPT_FS|OPT_FORMAT|						\
 	  OPT_HUMAN_READABLE|OPT_MUST_BE_POW_2|OPT_SB_FIELD_SECTORS|OPT_SB_FIELD_ILOG2,\
@@ -225,7 +227,12 @@ enum fsck_err_opts {
 	  OPT_FS|OPT_INODE|OPT_FORMAT|OPT_MOUNT_OLD|OPT_RUNTIME,	\
 	  OPT_BOOL(),							\
 	  BCH_SB_ERASURE_CODE,		false,				\
-	  NULL,		"Enable erasure coding (DO NOT USE YET)")	\
+	  NULL,		"Enable erasure coding (RAID5/6; data replicas are capped at 3)")\
+	x(ec_max_data_blocks,		u8,				\
+	  OPT_FS|OPT_FORMAT|OPT_MOUNT|OPT_RUNTIME,			\
+	  OPT_UINT(0, 15),						\
+	  BCH_SB_EC_MAX_DATA_BLOCKS,	0,				\
+	  NULL,		"Cap data blocks per EC stripe (0 = use all active devs)")\
 	x(casefold,			u8,				\
 	  OPT_FS|OPT_INODE|OPT_FORMAT,					\
 	  OPT_BOOL(),							\
@@ -243,17 +250,12 @@ enum fsck_err_opts {
 	  NULL,		"Constrain inode numbers to 32 bits")		\
 	x(shard_inode_numbers_bits,	u8,				\
 	  OPT_FS|OPT_FORMAT,						\
-	  OPT_UINT(0, 8),						\
+	  OPT_UINT(0, 16),						\
 	  BCH_SB_SHARD_INUMS_NBITS,	0,				\
 	  NULL,		"Shard new inode numbers by CPU id")		\
-	x(btree_node_mem_ptr_optimization, u8,				\
-	  OPT_FS|OPT_MOUNT|OPT_RUNTIME|OPT_NODOC,			\
-	  OPT_BOOL(),							\
-	  BCH2_NO_SB_OPT,		true,				\
-	  NULL,		"Stash pointer to in memory btree node in btree ptr")\
 	x(gc_reserve_percent,		u8,				\
 	  OPT_FS|OPT_FORMAT|OPT_MOUNT|OPT_RUNTIME,			\
-	  OPT_UINT(5, 21),						\
+	  OPT_UINT(5, 20),						\
 	  BCH_SB_GC_RESERVE,		8,				\
 	  "%",		"Percentage of disk space to reserve for copygc")\
 	x(gc_reserve_bytes,		u64,				\
@@ -340,6 +342,14 @@ enum fsck_err_opts {
 	  NULL,		"Disable journal flush on sync/fsync\n"		\
 			"If enabled, writes can be lost, but only since the\n"\
 			"last journal write (default 1 second)")	\
+	x(move_writes_fua,		u8,				\
+	  OPT_FS|OPT_MOUNT|OPT_RUNTIME,					\
+	  OPT_BOOL(),							\
+	  BCH_SB_MOVE_WRITES_FUA,	false,				\
+	  NULL,		"Issue writes from background data moves (copygc,\n"\
+			"rebalance) with FUA, making them durable on\n"	\
+			"completion rather than relying on the journal's\n"\
+			"periodic cache flush")				\
 	x(journal_reclaim_delay,	u32,				\
 	  OPT_FS|OPT_MOUNT|OPT_RUNTIME,					\
 	  OPT_UINT(0, U32_MAX),						\
@@ -376,10 +386,17 @@ enum fsck_err_opts {
 	  BCH2_NO_SB_OPT,		FSCK_FIX_exit,			\
 	  NULL,		"Fix errors during fsck without asking")	\
 	x(ratelimit_errors,		u8,				\
-	  OPT_FS|OPT_MOUNT,						\
+	  OPT_FS|OPT_MOUNT|OPT_RUNTIME,					\
 	  OPT_BOOL(),							\
 	  BCH2_NO_SB_OPT,		RATELIMIT_ERRORS_DEFAULT,	\
 	  NULL,		"Ratelimit error messages during fsck")		\
+	x(no_commit_validate,		u8,				\
+	  OPT_FS|OPT_MOUNT,						\
+	  OPT_BOOL(),							\
+	  BCH2_NO_SB_OPT,		false,				\
+	  NULL,		"Disable commit-time-only bkey validation;\n"\
+			"for error injection tools, which must be able\n"\
+			"to write the states fsck is tested against")	\
 	x(nochanges,			u8,				\
 	  OPT_FS|OPT_MOUNT,						\
 	  OPT_BOOL(),							\
@@ -427,6 +444,13 @@ enum fsck_err_opts {
 	  OPT_STR_NOLIMIT(bch2_recovery_passes),			\
 	  BCH2_NO_SB_OPT,		0,				\
 	  NULL,		"Exit recovery after specified pass")		\
+	x(recovery_passes_skip_scheduled, u8,				\
+	  OPT_FS|OPT_MOUNT,						\
+	  OPT_BOOL(),							\
+	  BCH2_NO_SB_OPT,		false,				\
+	  NULL,		"Don't run repair passes, whether the superblock had "\
+			"them scheduled or something schedules them mid-mount; "\
+			"they stay scheduled for the next mount")	\
 	x(retain_recovery_info,		u8,				\
 	  0,								\
 	  OPT_BOOL(),							\
@@ -503,7 +527,7 @@ enum fsck_err_opts {
 	  OPT_BOOL(),							\
 	  BCH_SB_NOCOW,			false,				\
 	  NULL,		"Nocow mode: Writes will be done in place when possible.\n"\
-			"Snapshots and reflink will still caused writes to be COW\n"\
+			"Snapshots and reflink will still cause writes to be COW\n"\
 			"Implicitly disables data checksumming, compression and encryption")\
 	x(nocow_enabled,		u8,				\
 	  OPT_FS|OPT_MOUNT|OPT_NODOC,					\
@@ -545,6 +569,19 @@ enum fsck_err_opts {
 	  OPT_STR(bch2_member_states),					\
 	  BCH_MEMBER_STATE,		BCH_MEMBER_STATE_rw,		\
 	  "state",	"rw,ro,failed,spare")				\
+	x(label,			u16,				\
+	  OPT_DEVICE|OPT_FORMAT|OPT_RUNTIME,				\
+	  OPT_FN(bch2_opt_disk_label),					\
+	  BCH_MEMBER_GROUP,		0,				\
+	  "(label)",	"Device label: position in the label tree")	\
+	x(failure_domain,		u8,				\
+	  OPT_DEVICE|OPT_FORMAT|OPT_RUNTIME,				\
+	  OPT_STR_MEMBER(failure_domain),				\
+	  BCH2_NO_SB_OPT,		0,				\
+	  "(domain)",	"Failure domain: devices sharing a name are in the\n"\
+			"same failure domain; allocation spreads replicas\n"\
+			"across domains (a hard requirement for erasure\n"\
+			"coded stripe blocks)")				\
 	x(bucket_size,			u32,				\
 	  OPT_DEVICE|OPT_HUMAN_READABLE|OPT_SB_FIELD_SECTORS,		\
 	  OPT_UINT(0, S64_MAX),						\
@@ -552,13 +589,14 @@ enum fsck_err_opts {
 	  "size",	"Specifies the bucket size; must be greater than the btree node size")\
 	x(durability,			u8,				\
 	  OPT_DEVICE|OPT_RUNTIME|OPT_SB_FIELD_ONE_BIAS,			\
-	  OPT_UINT(0, BCH_REPLICAS_MAX + 1),				\
+	  OPT_UINT(0, BCH_REPLICAS_MAX),				\
 	  BCH_MEMBER_DURABILITY,	1,				\
 	  "n",		"Data written to this device will be considered\n"\
 			"to have already been replicated n times")	\
 	x(data_allowed,			u8,				\
 	  OPT_DEVICE|OPT_FORMAT,					\
-	  OPT_BITFIELD(__bch2_data_types),				\
+	  OPT_BITFIELD_MASK(__bch2_data_types,				\
+		  BIT(BCH_DATA_journal)|BIT(BCH_DATA_btree)|BIT(BCH_DATA_user)),\
 	  BCH_MEMBER_DATA_ALLOWED,	BIT(BCH_DATA_journal)|BIT(BCH_DATA_btree)|BIT(BCH_DATA_user),\
 	  "types",	"Allowed data types for this device: journal, btree, and/or user")\
 	x(discard,			u8,				\
@@ -577,6 +615,15 @@ enum fsck_err_opts {
 	  BCH2_NO_SB_OPT,		true,				\
 	  NULL,		"BTREE_ITER_prefetch causes btree nodes to be\n"\
 	  " prefetched sequentially")				\
+	x(btree_cache_shrinker_seeks,	u8,				\
+	  OPT_FS|OPT_MOUNT|OPT_RUNTIME,					\
+	  OPT_UINT(1, 100),						\
+	  BCH_SB_EXT_BTREE_CACHE_SHRINKER_SEEKS,	2,		\
+	  NULL,		"Shrinker cost of re-reading a btree node;\n"	\
+	  " higher means the btree cache is evicted less\n"	\
+	  " aggressively under memory pressure. Consider\n"	\
+	  " raising on rotational storage, where re-reading\n"	\
+	  " evicted nodes is expensive (pinned nodes use 4x)")	\
 	x(dev_readahead,		u64,				\
 	  OPT_FS|OPT_MOUNT|OPT_RUNTIME|OPT_HUMAN_READABLE|OPT_SB_FIELD_SECTORS,\
 	  OPT_UINT(0, BCH_SB_EXT_DEV_READAHEAD_MAX << 9),		\
@@ -648,6 +695,7 @@ struct bch_option {
 	u64			min, max;
 
 	const char * const *choices;
+	u64			choices_allowed_mask;
 
 	struct bch_opt_fn	fn;
 
@@ -663,6 +711,9 @@ struct bch_option {
 	u64			(*get_ext)(const struct bch_sb_field_ext *);
 	void			(*set_ext)(struct bch_sb_field_ext *, u64);
 
+	/* BCH_OPT_STR_MEMBER: the bch_member char[] field the string lives in */
+	unsigned		member_offset;
+	unsigned		member_size;
 };
 
 extern const struct bch_option bch2_opt_table[];
@@ -673,10 +724,10 @@ void bch2_opt_set_by_id(struct bch_opts *, enum bch_opt_id, u64);
 
 u64 bch2_opt_from_sb(struct bch_sb *, enum bch_opt_id, int);
 int bch2_opts_from_sb(struct bch_opts *, struct bch_sb *);
-bool __bch2_opt_set_sb(struct bch_sb *, int, const struct bch_option *, u64);
+bool __bch2_opt_set_sb(struct bch_sb *, int, const struct bch_option *, u64, const char *);
 
 struct bch_dev;
-bool bch2_opt_set_sb(struct bch_fs *, struct bch_dev *, const struct bch_option *, u64);
+bool bch2_opt_set_sb(struct bch_fs *, struct bch_dev *, const struct bch_option *, u64, const char *);
 
 int bch2_opt_lookup(const char *);
 int bch2_opt_validate(const struct bch_option *, u64, struct printbuf *);
@@ -694,7 +745,9 @@ void bch2_opts_to_text(struct printbuf *,
 		       struct bch_opts_mask *,
 		       unsigned, unsigned, unsigned);
 
-int bch2_opt_hook_pre_set(struct bch_fs *, struct bch_dev *, u64, enum bch_opt_id, u64, bool);
+struct opt_change_scope;
+int bch2_opt_hook_pre_set(struct bch_fs *, struct bch_dev *, u64, enum bch_opt_id, u64, bool,
+			  struct opt_change_scope *);
 int bch2_opts_hooks_pre_set(struct bch_fs *);
 void bch2_opt_hook_post_set(struct bch_fs *, struct bch_dev *, u64, enum bch_opt_id, u64);
 

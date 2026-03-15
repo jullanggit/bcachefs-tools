@@ -417,7 +417,7 @@ static int bch2_sb_crypt_validate(struct bch_sb *sb, struct bch_sb_field *f,
 	return 0;
 }
 
-static void bch2_sb_crypt_to_text(struct printbuf *out,
+static __cold void bch2_sb_crypt_to_text(struct printbuf *out,
 				  struct bch_fs *c,
 				  struct bch_sb *sb,
 				  struct bch_sb_field *f)
@@ -580,8 +580,7 @@ err:
  */
 int bch2_disable_encryption(struct bch_fs *c)
 {
-	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
-	guard(mutex)(&c->sb_lock);
+	guard(mutex_noio)(&c->sb_lock);
 
 	struct bch_sb_field_crypt *crypt = bch2_sb_field_get(c->disk_sb.sb, crypt);
 	if (!crypt)
@@ -614,8 +613,7 @@ int bch2_enable_encryption(struct bch_fs *c, bool keyed)
 	struct bch_sb_field_crypt *crypt;
 	int ret = -EINVAL;
 
-	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
-	guard(mutex)(&c->sb_lock);
+	guard(mutex_noio)(&c->sb_lock);
 
 	/* Do we already have an encryption key? */
 	if (bch2_sb_field_get(c->disk_sb.sb, crypt))

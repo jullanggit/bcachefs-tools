@@ -36,6 +36,7 @@
 #include "debug/sysfs.h"
 #include "debug/tests.h"
 
+#include "fs/dirent.h"
 #include "fs/inode.h"
 
 #include "init/error.h"
@@ -44,6 +45,7 @@
 
 #include "journal/journal.h"
 #include "journal/reclaim.h"
+#include "journal/write.h"
 
 #include "sb/counters.h"
 #include "sb/errors.h"
@@ -215,13 +217,12 @@ read_attribute(disk_groups);
 read_attribute(has_data);
 read_attribute(alloc_debug);
 read_attribute(usage_base);
+read_attribute(filldir64_specialization);
 
 #define x(t, n, ...)							\
 	static struct attribute sysfs_counter_##t = { .name = #t, .mode = 0644 };
 BCH_PERSISTENT_COUNTERS()
 #undef x
-
-rw_attribute(label);
 
 read_attribute(copy_gc_wait);
 
@@ -239,9 +240,9 @@ read_attribute(moving_ctxts);
 
 read_attribute(recent_counters);
 
-#ifdef CONFIG_BCACHEFS_TESTS
+#if defined(CONFIG_BCACHEFS_TESTS) && defined(CONFIG_BCACHEFS_RUST)
 write_attribute(perf_test);
-#endif /* CONFIG_BCACHEFS_TESTS */
+#endif
 
 #define x(_name, ...)						\
 	static struct attribute sysfs_time_stat_##_name =		\
@@ -252,20 +253,12 @@ write_attribute(perf_test);
 static size_t bch2_btree_cache_size(struct bch_fs *c)
 {
 	struct bch_fs_btree_cache *bc = &c->btree.cache;
-	size_t ret = 0;
-	struct btree *b;
 
-	guard(mutex)(&bc->lock);
-	list_for_each_entry(b, &bc->live[0].list, list)
-		ret += btree_buf_bytes(b);
-	list_for_each_entry(b, &bc->live[1].list, list)
-		ret += btree_buf_bytes(b);
-	list_for_each_entry(b, &bc->freeable, list)
-		ret += btree_buf_bytes(b);
-	return ret;
+	return (btree_cache_list_nr(&bc->live[0]) +
+		btree_cache_list_nr(&bc->live[1])) * c->opts.btree_node_size;
 }
 
-static int bch2_compression_stats_to_text(struct printbuf *out, struct bch_fs *c)
+static __cold int bch2_compression_stats_to_text(struct printbuf *out, struct bch_fs *c)
 {
 	prt_str(out, "type");
 	printbuf_tabstop_push(out, 12);
@@ -304,17 +297,17 @@ static int bch2_compression_stats_to_text(struct printbuf *out, struct bch_fs *c
 	return 0;
 }
 
-static void bch2_gc_gens_pos_to_text(struct printbuf *out, struct bch_fs *c)
+static __cold void bch2_gc_gens_pos_to_text(struct printbuf *out, struct bch_fs *c)
 {
 	bch2_bbpos_to_text(out, c->gc_gens.pos);
 	prt_printf(out, "\n");
 }
 
-static void bch2_fs_usage_base_to_text(struct printbuf *out, struct bch_fs *c)
+static __cold void bch2_fs_usage_base_to_text(struct printbuf *out, struct bch_fs *c)
 {
 	struct bch_fs_usage_base b = {};
 
-	acc_u64s_percpu(&b.hidden, &c->capacity.usage->hidden, sizeof(b) / sizeof(u64));
+	acc_u64s_percpu(&b.hidden, &c->capacity.pcpu->usage.hidden, sizeof(b) / sizeof(u64));
 
 	prt_printf(out, "hidden:\t\t%llu\n",	b.hidden);
 	prt_printf(out, "btree:\t\t%llu\n",	b.btree);
@@ -426,6 +419,9 @@ SHOW(bch2_fs)
 	if (attr == &sysfs_usage_base)
 		bch2_fs_usage_base_to_text(out, c);
 
+	if (attr == &sysfs_filldir64_specialization)
+		bch2_filldir64_specialization_to_text(out);
+
 	return 0;
 }
 
@@ -467,7 +463,7 @@ STORE(bch2_fs)
 		bch2_do_invalidates(c);
 
 	if (attr == &sysfs_trigger_freelist_wakeup)
-		closure_wake_up(&c->allocator.freelist_wait);
+		bch2_alloc_wake_all(c);
 
 	if (attr == &sysfs_trigger_recalc_capacity) {
 		guard(rwsem_read)(&c->state_lock);
@@ -502,8 +498,11 @@ STORE(bch2_fs)
 	if (attr == &sysfs_trigger_gc)
 		bch2_gc_gens(c);
 
-	if (attr == &sysfs_trigger_delete_dead_snapshots)
-		__bch2_delete_dead_snapshots(c);
+	if (attr == &sysfs_trigger_delete_dead_snapshots) {
+		/* debug force: bypass auto_snapshot_deletion; serialize via run_lock */
+		scoped_guard(mutex, &c->recovery.run_lock)
+			__bch2_delete_dead_snapshots(c);
+	}
 
 	if (attr == &sysfs_trigger_emergency_read_only) {
 		CLASS(bch_log_msg, msg)(c);
@@ -512,7 +511,7 @@ STORE(bch2_fs)
 		bch2_fs_emergency_read_only(c, &msg.m);
 	}
 
-#ifdef CONFIG_BCACHEFS_TESTS
+#if defined(CONFIG_BCACHEFS_TESTS) && defined(CONFIG_BCACHEFS_RUST)
 	if (attr == &sysfs_perf_test) {
 		char *tmp __free(kfree) = kstrdup(buf, GFP_KERNEL), *p = tmp;
 		char *test		= strsep(&p, " \t\n");
@@ -549,7 +548,7 @@ struct attribute *bch2_fs_files[] = {
 	&sysfs_compression_stats,
 	&sysfs_errors,
 
-#ifdef CONFIG_BCACHEFS_TESTS
+#if defined(CONFIG_BCACHEFS_TESTS) && defined(CONFIG_BCACHEFS_RUST)
 	&sysfs_perf_test,
 #endif
 	NULL
@@ -666,6 +665,7 @@ struct attribute *bch2_fs_internal_files[] = {
 	&sysfs_disk_groups,
 	&sysfs_alloc_debug,
 	&sysfs_usage_base,
+	&sysfs_filldir64_specialization,
 	NULL
 };
 
@@ -714,6 +714,8 @@ static ssize_t bch2_btree_trans_stats_json_read(struct file *file,
 			if (IS_ENABLED(CONFIG_BCACHEFS_LOCK_TIME_STATS)) {
 				prt_str(out, ",\"lock_hold_times\":");
 				bch2_time_stats_json_to_text(out, &s->lock_hold_times, NULL, 0);
+				prt_str(out, ",\"lock_wait_times\":");
+				bch2_time_stats_json_to_text(out, &s->lock_wait_times, NULL, 0);
 			}
 
 			prt_char(out, '}');
@@ -748,6 +750,11 @@ static ssize_t bch2_btree_trans_stats_json_write(struct file *file,
 		guard(mutex)(&s->lock);
 		bch2_time_stats_reset(&s->duration);
 		bch2_time_stats_reset(&s->lock_hold_times);
+		bch2_time_stats_reset(&s->lock_wait_times);
+		s->nr_max_paths = 0;
+		s->max_mem = 0;
+		kfree(s->max_paths_text);
+		s->max_paths_text = NULL;
 	}
 
 	return count;
@@ -769,12 +776,22 @@ static ssize_t sysfs_opt_show(struct bch_fs *c,
 	const struct bch_option *opt = bch2_opt_table + id;
 	u64 v;
 
-	if (opt->flags & OPT_FS) {
-		v = bch2_opt_get_by_id(&c->opts, id);
-	} else if ((opt->flags & OPT_DEVICE) && opt->get_member)  {
+	if (ca) {
+		if (opt->type == BCH_OPT_STR_MEMBER) {
+			/* The value lives in the member, not a u64 - render it here: */
+			guard(mutex_noio)(&c->sb_lock);
+			struct bch_member m = bch2_sb_member_get(c->disk_sb.sb, ca->dev_idx);
+			prt_printf(out, "%.*s\n", (int) opt->member_size,
+				   (char *) &m + opt->member_offset);
+			return 0;
+		}
+		if (!((opt->flags & OPT_DEVICE) && opt->get_member))
+			return bch_err_throw(c, EINVAL_sysfs_opt_not_found);
 		v = bch2_opt_from_sb(c->disk_sb.sb, id, ca->dev_idx);
 	} else {
-		return bch_err_throw(c, EINVAL_sysfs_opt_not_found);
+		if (!(opt->flags & OPT_FS))
+			return bch_err_throw(c, EINVAL_sysfs_opt_not_found);
+		v = bch2_opt_get_by_id(&c->opts, id);
 	}
 
 	bch2_opt_to_text(out, c, c->disk_sb.sb, opt, v, OPT_SHOW_FULL_LIST);
@@ -801,19 +818,22 @@ static ssize_t sysfs_opt_store(struct bch_fs *c,
 	if (unlikely(!enumerated_ref_tryget(&c->writes, BCH_WRITE_REF_sysfs)))
 		return -EROFS;
 
-	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
+	guard(memalloc_flags)(PF_MEMALLOC_NOIO);
 	guard(opt_change_lock)(c);
+	CLASS(opt_change_scope, opt_scope)(c);
 
+	char *val = strim(tmp);
 	u64 v;
-	ret =   bch2_opt_parse(c, opt, strim(tmp), &v, NULL) ?:
-		bch2_opt_hook_pre_set(c, ca, 0, id, v, true);
+	ret =   bch2_opt_parse(c, opt, val, &v, NULL) ?:
+		bch2_opt_hook_pre_set(c, ca, 0, id, v, true, &opt_scope);
 
 	if (!ret) {
-		bool is_sb = opt->get_sb || opt->get_member || opt->get_ext;
+		bool is_sb = opt->get_sb || opt->get_member || opt->get_ext ||
+			     opt->type == BCH_OPT_STR_MEMBER;
 		bool changed = false;
 
 		if (is_sb) {
-			changed = bch2_opt_set_sb(c, ca, opt, v);
+			changed = bch2_opt_set_sb(c, ca, opt, v, val);
 		} else if (!ca) {
 			changed = bch2_opt_get_by_id(&c->opts, id) != v;
 		} else {
@@ -869,6 +889,18 @@ int bch2_opts_create_sysfs_files(struct kobject *kobj, unsigned type)
 		if (i->flags & OPT_HIDDEN)
 			continue;
 		if (!(i->flags & type))
+			continue;
+
+		/*
+		 * For options that are both OPT_FS and OPT_DEVICE (currently
+		 * only @discard), expose only the per-device sysfs entry: the
+		 * FS-level entry would alias to c->opts but member-backed
+		 * options have no FS-wide superblock field, so writes via the
+		 * FS path are silent no-ops and reads can't disambiguate
+		 * which scope is being shown. Mount-time @-o discard= remains
+		 * the only fs-scope handle.
+		 */
+		if (type == OPT_FS && (i->flags & OPT_DEVICE))
 			continue;
 
 		try(sysfs_create_file(kobj, &i->attr));
@@ -955,7 +987,7 @@ static const char * const bch2_rw[] = {
 	NULL
 };
 
-static void dev_io_done_to_text(struct printbuf *out, struct bch_dev *ca)
+static __cold void dev_io_done_to_text(struct printbuf *out, struct bch_dev *ca)
 {
 	prt_printf(out, "{\n");
 	for (int rw = 0; rw < 2; rw++) {
@@ -979,12 +1011,6 @@ SHOW(bch2_dev)
 
 	sysfs_print(first_bucket,	ca->mi.first_bucket);
 	sysfs_print(nbuckets,		ca->mi.nbuckets);
-
-	if (attr == &sysfs_label) {
-		if (ca->mi.group)
-			bch2_disk_path_to_text(out, c, ca->mi.group - 1);
-		prt_char(out, '\n');
-	}
 
 	if (attr == &sysfs_has_data) {
 		prt_bitflags(out, __bch2_data_types, bch2_dev_has_data(c, ca));
@@ -1044,14 +1070,6 @@ STORE(bch2_dev)
 	struct bch_dev *ca = container_of(kobj, struct bch_dev, kobj);
 	struct bch_fs *c = ca->fs;
 
-	if (attr == &sysfs_label) {
-		char *tmp __free(kfree) = kstrdup(buf, GFP_KERNEL);
-		if (!tmp)
-			return -ENOMEM;
-
-		try(bch2_dev_group_set(c, ca, strim(tmp)));
-	}
-
 	if (attr == &sysfs_io_errors_reset)
 		bch2_dev_errors_reset(ca);
 
@@ -1067,9 +1085,6 @@ struct attribute *bch2_dev_files[] = {
 	&sysfs_uuid,
 	&sysfs_first_bucket,
 	&sysfs_nbuckets,
-
-	/* settings: */
-	&sysfs_label,
 
 	&sysfs_has_data,
 	&sysfs_io_done,

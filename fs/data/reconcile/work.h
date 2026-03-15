@@ -11,6 +11,7 @@ extern const char * const bch2_reconcile_opts[];
 	x(fs)				\
 	x(metadata)			\
 	x(pending)			\
+	x(stripes)			\
 	x(device)			\
 	x(inum)
 
@@ -27,17 +28,60 @@ struct reconcile_scan {
 	};
 };
 
+/* No opt change touches more than one bracketed reconcile scan today: */
+#define BCH_OPT_CHANGE_SCANS_MAX	4
+
+/*
+ * The reconcile-scan cookies an opt change registered as in-flight - see
+ * bch2_set_reconcile_needs_scan_pre(). Constructed empty, populated by
+ * bch2_opt_hook_pre_set(); the destructor unregisters them, so an opt change
+ * that errors out (or never reaches bch2_opt_hook_post_set()) doesn't leak a
+ * registration and wedge the reconcile thread on that cookie.
+ */
+struct opt_change_scope {
+	struct bch_fs		*c;
+	unsigned		nr;
+	u64			cookies[BCH_OPT_CHANGE_SCANS_MAX];
+};
+
+static inline struct opt_change_scope bch2_opt_change_scope_init(struct bch_fs *c)
+{
+	return (struct opt_change_scope) { .c = c };
+}
+
+void bch2_opt_change_scope_exit(struct opt_change_scope *);
+
+DEFINE_CLASS(opt_change_scope, struct opt_change_scope,
+	     bch2_opt_change_scope_exit(&_T),
+	     bch2_opt_change_scope_init(c),
+	     struct bch_fs *c);
+
 int bch2_set_reconcile_needs_scan_trans(struct btree_trans *, struct reconcile_scan);
 int bch2_set_reconcile_needs_scan(struct bch_fs *, struct reconcile_scan, bool);
+int bch2_set_reconcile_needs_scan_pre(struct bch_fs *, struct reconcile_scan, struct opt_change_scope *);
+int bch2_set_reconcile_needs_scan_post(struct bch_fs *, struct reconcile_scan);
 int bch2_set_fs_needs_reconcile(struct bch_fs *);
 
-static inline void bch2_reconcile_wakeup(struct bch_fs *c)
+int bch2_reconcile_scan_cookie_is_set(struct btree_trans *, u64);
+
+static inline u32 bch2_reconcile_kick(struct bch_fs *c)
 {
-	c->reconcile.kick++;
+	u32 kick = atomic_inc_return(&c->reconcile.kick);
 	guard(rcu)();
 	struct task_struct *p = rcu_dereference(c->reconcile.thread);
 	if (p)
 		wake_up_process(p);
+	return kick;
+}
+
+static inline void bch2_reconcile_wakeup(struct bch_fs *c)
+{
+	bch2_reconcile_kick(c);
+}
+
+static inline u32 bch2_reconcile_completed_kick(struct bch_fs *c)
+{
+	return atomic_read(&c->reconcile.completed_kick);
 }
 
 static inline int bch2_reconcile_pending_wakeup(struct bch_fs *c)
