@@ -3,17 +3,17 @@
 ## ktest CI
 
 - **Dashboard**: https://evilpiepirate.org/~testdashboard/c
-- **Config**: `~/ktest-ci.toml` (branches, test groups, CI URL)
-- **Local CI data**: `~/ci-data`
-- **Test files**: `~/ktest/tests/fs/bcachefs/*.ktest`
+- **Test files**: `../ktest/tests/fs/bcachefs/*.ktest`
 
 ## ktest
 
-Tests live in `~/ktest/tests/fs/bcachefs/` (e.g. `subvol.ktest`).
+Tests live in `../ktest/tests/fs/bcachefs/` (e.g. `subvol.ktest`).
 
 ```bash
-# Run a test
-btk run -IP ~/ktest/tests/fs/bcachefs/<file>.ktest <test_name>
+# Run shrink tests
+./scripts/install-to-kernel.sh ../bcachefs-test/
+cd ../ktest
+direnv exec . ./build-test-kernel run -k ../bcachefs-test tests/fs/bcachefs/shrink.ktest <specific tests> 2>&1 | tee /tmp/<log file>
 ```
 
 - Test functions in the file are named `test_*`; drop the `test_` prefix
@@ -26,6 +26,8 @@ btk run -IP ~/ktest/tests/fs/bcachefs/<file>.ktest <test_name>
   not `.linux`.
 - With `-I` (interactive), the VM stays running after the test
   completes — must `C-c` to kill before running another.
+- Alwasy redirect into a log file as there can be a lot of output and this
+  enables searching through it using grep etc
 
 ## Testing C-to-Rust command conversions
 
