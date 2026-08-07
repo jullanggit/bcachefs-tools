@@ -498,7 +498,7 @@ static int bch2_bkey_needs_reconcile(struct btree_trans *trans, struct bkey_s_c 
 		incompressible	|= p.crc.compression_type == BCH_COMPRESSION_TYPE_incompressible;
 		unwritten	|= p.ptr.unwritten;
 
-		bool evacuating = bch2_dev_bad_or_evacuating(c, p.ptr.dev) && !p.has_ec;
+		bool evacuating = bch2_ptr_bad_or_evacuating(c, &p.ptr) && !p.has_ec;
 
 		if (!poisoned &&
 		    !btree &&
@@ -539,8 +539,14 @@ static int bch2_bkey_needs_reconcile(struct btree_trans *trans, struct bkey_s_c 
 	if (k.k->type == KEY_TYPE_stripe) {
 		*ret = r;
 
-		return (r.need_rb & BIT(BCH_RECONCILE_data_replicas)) &&
-			!bkey_s_c_to_stripe(k).v->needs_reconcile;
+		/*
+		 * A repair pass can lose the stripe's work item (e.g. a stale
+		 * needs_reconcile read racing the scan's flag update), and unless
+		 * the scan re-queues it the stripe stays flagged-but-never-repaired
+		 * forever.
+		 * TODO: a cleaner fix would be avoiding the race in the first place
+		 */
+		return r.need_rb & BIT(BCH_RECONCILE_data_replicas);
 	}
 
 	if (unwritten || incompressible)
@@ -730,6 +736,16 @@ static int new_needs_rb_allowed(struct btree_trans *trans,
 	}
 
 	/*
+	 * Shrink/evacuation can mark an extent under-replicated as soon as one
+	 * pointer falls onto a bad/evacuating location, before the device scan
+	 * has rewritten the reconcile entry. That's a transient physical-state
+	 * change, not a missing io-opts propagation cookie.
+	 */
+	if ((new_need_rb & BIT(BCH_RECONCILE_data_replicas)) &&
+	    bch2_bkey_has_ptr_bad_or_evacuating(c, k))
+		return 0;
+
+	/*
 	 * Either the extent data or the extent io options (from
 	 * bch_extent_reconcile) should match the io_opts from the
 	 * inode/filesystem, unless
@@ -751,7 +767,14 @@ static int new_needs_rb_allowed(struct btree_trans *trans,
 	if (ret)
 		return min(ret, 0);
 
-	if (new_need_rb == BIT(BCH_RECONCILE_data_replicas)) {
+	/*
+	 * Device scans can add evacuation/rereplicate work on top of existing
+	 * reconcile state, e.g. an extent that was already waiting on
+	 * erasure-code conversion. While that scan cookie is pending, tolerate
+	 * missing data_replicas/hipri state even if other reconcile bits are
+	 * also set; the scan will rewrite the full reconcile entry.
+	 */
+	if (new_need_rb & BIT(BCH_RECONCILE_data_replicas)) {
 		ret = check_dev_reconcile_scan_cookie(trans, k, s ? &s->dev_cookie : NULL);
 		if (ret)
 			return min(ret, 0);
@@ -805,6 +828,17 @@ static int set_needs_reconcile_stripe(struct btree_trans *trans,
 	}
 
 	s.v->needs_reconcile = new_needs_reconcile;
+
+	/*
+	 * A repair pass can lose the stripe's work item (e.g. a stale
+	 * needs_reconcile read racing the scan's flag update), and unless
+	 * the scan re-queues it the stripe stays flagged-but-never-repaired
+	 * forever.
+	 * TODO: a cleaner fix would be avoiding the race in the first place
+	 */
+	if (new_needs_reconcile)
+		try(reconcile_work_mod(trans, k.s_c, RECONCILE_WORK_hipri,
+				       data_to_rb_work_pos(BTREE_ID_stripes, k.k->p), true));
 	return 0;
 }
 
@@ -1025,25 +1059,35 @@ int bch2_bkey_get_io_opts(struct btree_trans *trans,
 			if (snapshot_opts->cur_inum != k.k->p.inode) {
 				snapshot_opts->d.nr = 0;
 
-				try(for_each_btree_key_max(trans, iter, BTREE_ID_inodes,
-							   SPOS(0, k.k->p.inode, 0),
-							   SPOS(0, k.k->p.inode, U32_MAX),
-							   BTREE_ITER_all_snapshots, inode_k, ({
-					struct bch_inode_unpacked inode;
+				/*
+				 * norestart: callers (e.g. fsck repair paths)
+				 * may have updates queued; an internal
+				 * trans_begin() would clobber them
+				 */
+				struct bkey_s_c inode_k;
+				int ret = 0;
+				for_each_btree_key_max_norestart(trans, iter, BTREE_ID_inodes,
+						SPOS(0, k.k->p.inode, 0),
+						SPOS(0, k.k->p.inode, U32_MAX),
+						BTREE_ITER_all_snapshots, inode_k, ret) {
 					if (!bkey_is_inode(inode_k.k))
 						continue;
+
+					struct bch_inode_unpacked inode;
 					bch2_inode_unpack(c, inode_k, &inode);
 
 					struct snapshot_io_opts_entry e = { .snapshot = inode_k.k->p.snapshot };
 					bch2_inode_opts_get_inode(c, &inode, &e.io_opts);
 
-					darray_push(&snapshot_opts->d, e);
-				})));
+					ret = darray_push(&snapshot_opts->d, e);
+					if (ret)
+						break;
+				}
+				if (ret)
+					return ret;
 
 				snapshot_opts->cur_inum	= k.k->p.inode;
 				snapshot_opts->inum_scan_cookie	= false;
-
-				return bch_err_throw(c, transaction_restart_nested);
 			}
 
 			struct snapshot_io_opts_entry *i =

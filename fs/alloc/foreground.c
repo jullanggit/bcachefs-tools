@@ -41,6 +41,7 @@
 #include "init/error.h"
 
 #include "journal/journal.h"
+#include "journal/reclaim.h"
 
 #include "sb/counters.h"
 
@@ -278,7 +279,9 @@ static struct open_bucket *__try_alloc_bucket(struct bch_fs *c,
 	if (unlikely(is_superblock_bucket(c, ca, bucket)))
 		return NULL;
 
-	if (unlikely(bch2_bucket_nouse(ca, bucket))) {
+	if (unlikely(bch2_bucket_nouse(ca, bucket) ||
+		     (bch2_dev_is_shrinking(ca) &&
+		      bucket >= bch2_dev_resize_target(ca)))) {
 		req->counters.skipped_nouse++;
 		return NULL;
 	}
@@ -654,7 +657,7 @@ static noinline __cold void bucket_alloc_to_text(struct printbuf *out,
 	if (req->ca) {
 		prt_printf(out, "dev\t%s (%u)\n",	req->ca->name, req->ca->dev_idx);
 		prt_printf(out, "avail\t%llu\n",	__dev_buckets_free(req->ca, req->usage, req->watermark));
-		scoped_guard(percpu_read, &c->capacity.mark_lock)
+		scoped_guard(percpu_read_noio, &c->capacity.mark_lock)
 			prt_printf(out, "copygc dev wait\t%lli\n", bch2_copygc_dev_wait_amount(req->ca));
 	}
 
@@ -786,7 +789,7 @@ again:
 		    c->recovery.pass_done < BCH_RECOVERY_PASS_check_allocations)
 			goto alloc;
 
-		scoped_guard(percpu_read, &c->capacity.mark_lock)
+		scoped_guard(percpu_read_noio, &c->capacity.mark_lock)
 			copygc_can_make_progress = bch2_copygc_can_make_progress(ca);
 		if (copygc_can_make_progress) {
 			req->copygc_can_make_progress = true;
@@ -842,6 +845,19 @@ err:
 
 	if (!ret) {
 		ob->data_type = req->data_type;
+
+		/*
+		 * We just consumed an open bucket. If the pool is getting low, poke
+		 * the journal watermark: it factors in open-bucket usage and will
+		 * throttle new journal-reserving work before the reclaim path starves
+		 * (see bch2_journal_set_watermark()). freelist_lock has been dropped
+		 * by now, so taking j->lock here doesn't nest the two.
+		 */
+		if (unlikely(READ_ONCE(c->allocator.open_buckets_nr_free) <
+			     bch2_open_buckets_journal_reserved())) {
+			guard(spinlock)(&c->journal.lock);
+			bch2_journal_set_watermark(&c->journal);
+		}
 
 		event_inc_trace(c, bucket_alloc, buf,
 			bucket_alloc_to_text(&buf, c, req, ob));
@@ -906,10 +922,20 @@ static void dev_stripe_state_sync(struct dev_stripe_state *stripe,
 	stripe->cached_devs = *devs;
 }
 
-void bch2_dev_alloc_list(struct bch_fs *c,
-			 struct dev_stripe_state *stripe,
-			 struct bch_devs_mask *devs,
-			 struct dev_alloc_list *ret)
+/*
+ * Devices are ordered by failure domain occupancy first - so replicas
+ * spread across failure domains - with the free space round robin breaking
+ * ties:
+ */
+#define dev_alloc_cmp(l, r)						\
+	((domain_keys ? cmp_int(domain_keys[l], domain_keys[r]) : 0) ?:\
+	 __dev_stripe_cmp(stripe, l, r))
+
+static void __dev_alloc_list(struct bch_fs *c,
+			     struct dev_stripe_state *stripe,
+			     struct bch_devs_mask *devs,
+			     const u64 *domain_keys,
+			     struct dev_alloc_list *ret)
 {
 	dev_stripe_state_sync(stripe, devs);
 
@@ -919,7 +945,60 @@ void bch2_dev_alloc_list(struct bch_fs *c,
 	for_each_set_bit(i, devs->d, BCH_SB_MEMBERS_MAX)
 		ret->data[ret->nr++] = i;
 
-	bubble_sort(ret->data, ret->nr, dev_stripe_cmp);
+	bubble_sort(ret->data, ret->nr, dev_alloc_cmp);
+}
+
+/*
+ * Refresh req->domain_keys for every device we may allocate from - one rcu
+ * section per batch. Recomputed whenever devs_chosen changes (each pick
+ * changes the occupancy the next pick should avoid):
+ */
+static void bch2_dev_domain_keys_update(struct bch_fs *c, struct alloc_request *req)
+{
+	unsigned i;
+	scoped_guard(rcu)
+		for_each_set_bit(i, req->devs_may_alloc.d, BCH_SB_MEMBERS_MAX)
+			req->domain_keys[i] = bch2_dev_domain_key(c, &req->devs_chosen, i);
+
+	/*
+	 * For erasure coding failure domains are a hard requirement, not a
+	 * preference: exclude every device sharing a domain with an
+	 * already-chosen block (domain_key > 0) so the allocation fails, or
+	 * narrows, rather than doubling up.
+	 */
+	if (req->failure_domains_required)
+		for_each_set_bit(i, req->devs_may_alloc.d, BCH_SB_MEMBERS_MAX)
+			if (req->domain_keys[i])
+				__clear_bit(i, req->devs_may_alloc.d);
+}
+
+/*
+ * The journal's device selection: domain keys live in the caller's scratch
+ * buffer rather than an alloc_request:
+ */
+void bch2_dev_alloc_list_devs(struct bch_fs *c,
+			      struct dev_stripe_state *stripe,
+			      struct bch_devs_mask *devs,
+			      const struct bch_devs_mask *devs_chosen,
+			      u64 *domain_keys,
+			      struct dev_alloc_list *ret)
+{
+	unsigned i;
+	scoped_guard(rcu)
+		for_each_set_bit(i, devs->d, BCH_SB_MEMBERS_MAX)
+			domain_keys[i] = bch2_dev_domain_key(c, devs_chosen, i);
+
+	__dev_alloc_list(c, stripe, devs, domain_keys, ret);
+}
+
+void bch2_dev_alloc_list(struct bch_fs *c,
+			 struct dev_stripe_state *stripe,
+			 struct alloc_request *req)
+{
+	bch2_dev_domain_keys_update(c, req);
+
+	__dev_alloc_list(c, stripe, &req->devs_may_alloc,
+			 req->domain_keys, &req->devs_sorted);
 }
 
 static const u64 stripe_clock_hand_rescale	= 1ULL << 62; /* trigger rescale at */
@@ -998,6 +1077,7 @@ static int add_new_bucket(struct bch_fs *c,
 	BUG_ON(req->nr_effective >= req->nr_replicas && durability);
 
 	__clear_bit(ob->dev, req->devs_may_alloc.d);
+	__set_bit(ob->dev, req->devs_chosen.d);
 	req->nr_effective	+= durability;
 
 	ob_push(c, &req->ptrs, ob);
@@ -1018,38 +1098,59 @@ int bch2_bucket_alloc_set_trans(struct btree_trans *trans,
 {
 	struct bch_fs *c = trans->c;
 	int ret = 0;
+	bool progress;
 
 	BUG_ON(req->nr_effective >= req->nr_replicas);
 
-	bch2_dev_alloc_list(c, stripe, &req->devs_may_alloc, &req->devs_sorted);
+	bch2_dev_alloc_list(c, stripe, req);
 
+	/*
+	 * Evaluated once, on the full candidate list: this classifies the
+	 * whole allocation for tracing/bailing, and must not flip as the
+	 * list shrinks below.
+	 */
 	if (req->devs_sorted.nr <= 1)
 		req->will_retry_target_devices = false;
 
-	darray_for_each(req->devs_sorted, i) {
-		req->ca = bch2_dev_tryget_noerror(c, *i);
-		if (!req->ca)
-			continue;
+	do {
+		progress = false;
 
-		req->will_retry_set_devices =
-			i + 1 < req->devs_sorted.data + req->devs_sorted.nr;
+		darray_for_each(req->devs_sorted, i) {
+			req->ca = bch2_dev_tryget_noerror(c, *i);
+			if (!req->ca)
+				continue;
 
-		struct open_bucket *ob = bch2_bucket_alloc_trans(trans, req);
-		if (!IS_ERR(ob))
-			bch2_dev_stripe_increment_inlined(req->ca, stripe, &req->usage);
+			req->will_retry_set_devices =
+				i + 1 < req->devs_sorted.data + req->devs_sorted.nr;
 
-		bch2_dev_put(req->ca);
-		req->ca = NULL;
+			struct open_bucket *ob = bch2_bucket_alloc_trans(trans, req);
+			if (!IS_ERR(ob))
+				bch2_dev_stripe_increment_inlined(req->ca, stripe, &req->usage);
 
-		if (IS_ERR(ob)) { /* don't squash error */
-			ret = PTR_ERR(ob);
-			if (bch2_err_matches(ret, BCH_ERR_transaction_restart) ||
-			    bch2_err_matches(ret, BCH_ERR_operation_blocked) ||
-			    bch2_err_matches(ret, BCH_ERR_open_buckets_empty))
-				return ret;
-		} else if (add_new_bucket(c, req, ob))
-			return 0;
-	}
+			bch2_dev_put(req->ca);
+			req->ca = NULL;
+
+			if (IS_ERR(ob)) { /* don't squash error */
+				ret = PTR_ERR(ob);
+				if (bch2_err_matches(ret, BCH_ERR_transaction_restart) ||
+				    bch2_err_matches(ret, BCH_ERR_operation_blocked) ||
+				    bch2_err_matches(ret, BCH_ERR_open_buckets_empty))
+					return ret;
+			} else if (add_new_bucket(c, req, ob)) {
+				return 0;
+			} else {
+				progress = true;
+				break;
+			}
+		}
+
+		/*
+		 * Each allocation changes which failure domains the next
+		 * replica should avoid - re-sort and go again:
+		 */
+		if (progress)
+			bch2_dev_alloc_list(c, stripe, req);
+	} while (progress);
 
 	return ret ?: alloc_trace_add(req, BCH_SB_MEMBER_INVALID,
 			bch_err_throw(c, insufficient_devices), 0, 0, false);
@@ -1073,7 +1174,7 @@ static int bucket_alloc_from_stripe(struct btree_trans *trans,
 	if (!h)
 		return 0;
 
-	bch2_dev_alloc_list(c, &req->wp->stripe, &req->devs_may_alloc, &req->devs_sorted);
+	bch2_dev_alloc_list(c, &req->wp->stripe, req);
 
 	darray_for_each(req->devs_sorted, i)
 		for (unsigned ec_idx = 0; ec_idx < ec_stripe_new_nr_data(h->s); ec_idx++) {
@@ -1166,23 +1267,43 @@ static int bucket_alloc_set_partial(struct bch_fs *c,
 
 	guard(spinlock)(&a->freelist_lock);
 
-	if (!a->open_buckets_partial_nr)
-		return 0;
+	/*
+	 * Pick the domain-best usable candidate each round, not the first
+	 * match: on a steady-state filesystem most allocations are satisfied
+	 * here, and first-fit would undo the failure domain spreading
+	 * bch2_bucket_alloc_set_trans() does for fresh buckets. Each pick
+	 * updates devs_chosen (via add_new_bucket), so the keys are
+	 * recomputed per round - same shape as the fresh-bucket re-sort loop.
+	 */
+	while (a->open_buckets_partial_nr) {
+		int best = -1;
+		u64 best_key = U64_MAX;
 
-	for (int i = a->open_buckets_partial_nr - 1; i >= 0; --i) {
-		struct open_bucket *ob = a->open_buckets + a->open_buckets_partial[i];
+		bch2_dev_domain_keys_update(c, req);
 
-		if (want_bucket(c, req, ob)) {
-			struct bch_dev *ca = ob_dev(c, ob);
-			u64 avail;
+		for (int i = a->open_buckets_partial_nr - 1; i >= 0; --i) {
+			struct open_bucket *ob = a->open_buckets + a->open_buckets_partial[i];
 
-			bch2_dev_usage_read_fast(ca, &req->usage);
-			avail = __dev_buckets_free(ca, req->usage, req->watermark) + ca->nr_partial_buckets;
-			if (!avail)
+			if (!want_bucket(c, req, ob))
 				continue;
 
-			try(partial_bucket_alloc(c, req, i));
+			struct bch_dev *ca = ob_dev(c, ob);
+
+			bch2_dev_usage_read_fast(ca, &req->usage);
+			if (!(__dev_buckets_free(ca, req->usage, req->watermark) +
+			      ca->nr_partial_buckets))
+				continue;
+
+			if (req->domain_keys[ob->dev] < best_key) {
+				best		= i;
+				best_key	= req->domain_keys[ob->dev];
+			}
 		}
+
+		if (best < 0)
+			return 0;
+
+		try(partial_bucket_alloc(c, req, best));
 	}
 
 	return 0;
@@ -1245,20 +1366,21 @@ static int bucket_alloc_cached(struct btree_trans *trans, struct alloc_request *
  * @ec:		if true, we're shutting down erasure coding and killing all ec
  *		open_buckets
  *		otherwise, return true
+ * @tail_cutoff: if != 0 only drop buckets after the cutoff
  * Returns: true if we should kill this open_bucket
  *
  * We're killing open_buckets because we're shutting down a device, erasure
  * coding, or the entire filesystem - check if this open_bucket matches:
  */
 static bool should_drop_bucket(struct open_bucket *ob, struct bch_fs *c,
-			       struct bch_dev *ca, bool ec)
+			       struct bch_dev *ca, bool ec, u64 tail_cutoff)
 {
 	struct bch_fs_allocator *a = &c->allocator;
 
 	if (ec) {
 		return ob->ec != NULL;
 	} else if (ca) {
-		bool drop = ob->dev == ca->dev_idx;
+		bool drop = dev_and_region_matches(ob, ca, tail_cutoff);
 
 		if (!drop && ob->ec) {
 			guard(mutex)(&ob->ec->lock);
@@ -1269,8 +1391,12 @@ static bool should_drop_bucket(struct open_bucket *ob, struct bch_fs *c,
 					continue;
 
 				struct open_bucket *ob2 = a->open_buckets + ob->ec->blocks[i];
-				drop |= ob2->dev == ca->dev_idx;
+				drop |= dev_and_region_matches(ob2, ca, tail_cutoff);
 			}
+
+			if (!drop && ob->ec->have_old_stripe)
+				drop = stripe_dev_and_region_matches(c, ca,
+						&ob->ec->old_stripe.key.v, tail_cutoff);
 		}
 
 		return drop;
@@ -1280,7 +1406,7 @@ static bool should_drop_bucket(struct open_bucket *ob, struct bch_fs *c,
 }
 
 static void bch2_writepoint_stop(struct bch_fs *c, struct bch_dev *ca,
-				 bool ec, struct write_point *wp)
+				 bool ec, struct write_point *wp, u64 tail_cutoff)
 {
 	struct open_buckets ptrs = { .nr = 0 };
 	struct open_bucket *ob;
@@ -1288,26 +1414,27 @@ static void bch2_writepoint_stop(struct bch_fs *c, struct bch_dev *ca,
 
 	guard(mutex)(&wp->lock);
 	open_bucket_for_each(c, &wp->ptrs, ob, i)
-		if (should_drop_bucket(ob, c, ca, ec))
+		if (should_drop_bucket(ob, c, ca, ec, tail_cutoff))
 			bch2_open_bucket_put(c, ob);
 		else
 			ob_push(c, &ptrs, ob);
 	wp->ptrs = ptrs;
 }
 
+/* stop open buckets on @ca, if tail_cutoff isn't zero, only after the cutoff */
 void bch2_open_buckets_stop(struct bch_fs *c, struct bch_dev *ca,
-			    bool ec)
+			    bool ec, u64 tail_cutoff)
 {
 	struct bch_fs_allocator *a = &c->allocator;
 	unsigned i;
 
-	/* Next, close write points that point to this device... */
+	/* Next, close write points that point to this device or the to-be-shrunk region... */
 	for (i = 0; i < ARRAY_SIZE(a->write_points); i++)
-		bch2_writepoint_stop(c, ca, ec, &a->write_points[i]);
+		bch2_writepoint_stop(c, ca, ec, &a->write_points[i], tail_cutoff);
 
-	bch2_writepoint_stop(c, ca, ec, &c->copygc.write_point);
-	bch2_writepoint_stop(c, ca, ec, &a->reconcile_write_point);
-	bch2_writepoint_stop(c, ca, ec, &a->btree_write_point);
+	bch2_writepoint_stop(c, ca, ec, &c->copygc.write_point, tail_cutoff);
+	bch2_writepoint_stop(c, ca, ec, &a->reconcile_write_point, tail_cutoff);
+	bch2_writepoint_stop(c, ca, ec, &a->btree_write_point, tail_cutoff);
 
 	scoped_guard(mutex, &c->btree.reserve_cache.lock)
 		while (c->btree.reserve_cache.nr) {
@@ -1323,7 +1450,7 @@ void bch2_open_buckets_stop(struct bch_fs *c, struct bch_dev *ca,
 			struct open_bucket *ob =
 				a->open_buckets + a->open_buckets_partial[i];
 
-			if (should_drop_bucket(ob, c, ca, ec)) {
+			if (should_drop_bucket(ob, c, ca, ec, tail_cutoff)) {
 				--a->open_buckets_partial_nr;
 				swap(a->open_buckets_partial[i],
 				     a->open_buckets_partial[a->open_buckets_partial_nr]);
@@ -1341,7 +1468,7 @@ void bch2_open_buckets_stop(struct bch_fs *c, struct bch_dev *ca,
 			}
 		}
 
-	bch2_ec_stop_dev(c, ca);
+	bch2_ec_stop_dev_cutoff(c, ca, tail_cutoff);
 }
 
 static inline struct hlist_head *writepoint_hash(struct bch_fs_allocator *a,
@@ -1548,12 +1675,21 @@ retry:
 				  cached_devs.d, BCH_SB_MEMBERS_MAX);
 		}
 
-		/* Don't allocate from devices we already have pointers to: */
-		darray_for_each(*req->devs_have, i)
-			__clear_bit(*i, req->devs_may_alloc.d);
+		/*
+		 * Don't allocate from devices we already have pointers to -
+		 * and spread away from their failure domains:
+		 */
+		memset(&req->devs_chosen, 0, sizeof(req->devs_chosen));
 
-		open_bucket_for_each(c, &req->ptrs, ob, i)
+		darray_for_each(*req->devs_have, i) {
+			__clear_bit(*i, req->devs_may_alloc.d);
+			__set_bit(*i, req->devs_chosen.d);
+		}
+
+		open_bucket_for_each(c, &req->ptrs, ob, i) {
 			__clear_bit(ob->dev, req->devs_may_alloc.d);
+			__set_bit(ob->dev, req->devs_chosen.d);
+		}
 
 		ret =   bucket_alloc_set_writepoint(c, req) ?:
 			bucket_alloc_set_partial(c, req) ?:
@@ -2166,7 +2302,7 @@ static bool alloc_wait_advanced(struct bch_fs *c, struct alloc_request *req)
 	if (unlikely(req->trace_alloc_failed))
 		return true;
 
-	guard(percpu_read)(&c->capacity.mark_lock);
+	guard(percpu_read_noio)(&c->capacity.mark_lock);
 	guard(rcu)();
 	bool found = false;
 

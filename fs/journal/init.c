@@ -75,8 +75,7 @@ static int bch2_set_nr_journal_buckets_iter(struct bch_dev *ca, unsigned nr,
 	ret = 0;
 
 	scoped_guard(journal_block, &c->journal) {
-		guard(memalloc_flags)(PF_MEMALLOC_NOFS);
-		guard(mutex)(&c->sb_lock);
+		guard(mutex_noio)(&c->sb_lock);
 
 		memcpy(new_buckets,	ja->buckets,	ja->nr * sizeof(u64));
 		memcpy(new_bucket_seq,	ja->bucket_seq,	ja->nr * sizeof(u64));
@@ -198,8 +197,7 @@ int bch2_dev_journal_bucket_delete(struct bch_dev *ca, u64 b)
 	struct journal *j = &c->journal;
 	struct journal_device *ja = &ca->journal;
 
-	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
-	guard(mutex)(&c->sb_lock);
+	guard(mutex_noio)(&c->sb_lock);
 	unsigned pos;
 	for (pos = 0; pos < ja->nr; pos++)
 		if (ja->buckets[pos] == b)
@@ -219,37 +217,53 @@ int bch2_dev_journal_bucket_delete(struct bch_dev *ca, u64 b)
 		&new_buckets[pos + 1],
 		(ja->nr - 1 - pos) * sizeof(new_buckets[0]));
 
-	int ret = bch2_journal_buckets_to_sb(c, ca, ja->buckets, ja->nr - 1) ?:
-		bch2_write_super(c);
+	int ret;
+
+	scoped_guard(journal_block, &c->journal) {
+		ret = bch2_journal_buckets_to_sb(c, ca, new_buckets, ja->nr - 1) ?:
+			bch2_write_super(c);
+		if (ret)
+			break;
+
+		scoped_guard(spinlock, &j->lock) {
+			if (pos < ja->discard_idx)
+				--ja->discard_idx;
+			if (pos < ja->dirty_idx_ondisk)
+				--ja->dirty_idx_ondisk;
+			if (pos < ja->dirty_idx)
+				--ja->dirty_idx;
+			if (pos < ja->cur_idx)
+				--ja->cur_idx;
+
+			ja->nr--;
+
+			memmove(&ja->buckets[pos],
+				&ja->buckets[pos + 1],
+				(ja->nr - pos) * sizeof(ja->buckets[0]));
+
+			memmove(&ja->bucket_seq[pos],
+				&ja->bucket_seq[pos + 1],
+				(ja->nr - pos) * sizeof(ja->bucket_seq[0]));
+
+			bch2_journal_space_available(j);
+		}
+	}
+
 	if (ret) {
 		kfree(new_buckets);
 		return ret;
 	}
 
-	scoped_guard(spinlock, &j->lock) {
-		if (pos < ja->discard_idx)
-			--ja->discard_idx;
-		if (pos < ja->dirty_idx_ondisk)
-			--ja->dirty_idx_ondisk;
-		if (pos < ja->dirty_idx)
-			--ja->dirty_idx;
-		if (pos < ja->cur_idx)
-			--ja->cur_idx;
+	kfree(new_buckets);
 
-		ja->nr--;
-
-		memmove(&ja->buckets[pos],
-			&ja->buckets[pos + 1],
-			(ja->nr - pos) * sizeof(ja->buckets[0]));
-
-		memmove(&ja->bucket_seq[pos],
-			&ja->bucket_seq[pos + 1],
-			(ja->nr - pos) * sizeof(ja->bucket_seq[0]));
-
-		bch2_journal_space_available(j);
+	{
+		CLASS(btree_trans, trans)(c);
+		ret = commit_do(trans, NULL, NULL, 0,
+			bch2_trans_mark_metadata_bucket(trans, ca, b,
+							BCH_DATA_free, 0,
+							BTREE_TRIGGER_transactional));
 	}
 
-	kfree(new_buckets);
 	return 0;
 }
 
@@ -282,7 +296,7 @@ int bch2_dev_journal_alloc(struct bch_dev *ca, bool new_fs)
 	 */
 	nr = clamp_t(unsigned, nr,
 		     BCH_JOURNAL_BUCKETS_MIN,
-		     system_totalram_bytes() / 4 / bucket_bytes(ca));
+		     div64_u64(system_totalram_bytes() / 4, bucket_bytes(ca)));
 
 	ret = bch2_set_nr_journal_buckets_loop(c, ca, nr, new_fs);
 err:
@@ -737,7 +751,7 @@ void bch2_fs_journal_init_early(struct journal *j)
 {
 	static struct lock_class_key res_key;
 
-	mutex_init(&j->buf_lock);
+	mutex_noio_init(&j->buf_lock);
 	spin_lock_init(&j->lock);
 	spin_lock_init(&j->err_lock);
 	INIT_DELAYED_WORK(&j->write_work, bch2_journal_write_work);

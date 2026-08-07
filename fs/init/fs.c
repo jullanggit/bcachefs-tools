@@ -320,8 +320,7 @@ static void __bch2_fs_read_only(struct bch_fs *c)
 	u64 seq = 0;
 
 	bch2_maybe_schedule_btree_bitmap_gc_stop(c);
-	bch2_fs_ec_stop(c);
-	bch2_open_buckets_stop(c, NULL, true);
+	bch2_open_buckets_stop(c, NULL, true, 0);
 	bch2_copygc_stop(c);
 	bch2_btree_write_buffer_stop(c);
 	bch2_fs_ec_flush(c);
@@ -410,6 +409,34 @@ void bch2_fs_read_only(struct bch_fs *c)
 	bch_verbose(c, "going read-only");
 
 	/*
+	 * Close write points before stopping background data movers. Shrink can
+	 * leave copygc waiting on allocator space from its dedicated
+	 * write_point; dropping those open buckets first breaks that dependency
+	 * so kthread_stop() does not hang behind a move write that's blocked in
+	 * the allocator.
+	 */
+	bch2_open_buckets_stop(c, NULL, true, 0);
+
+	/*
+	 * Stop per-device resize workers while writes are still available.
+	 * A pending resize may be in the middle of transactional alloc/accounting
+	 * updates; if it survives into clean shutdown it can trip write-path
+	 * assertions while the filesystem is already going read-only.
+	 */
+	bch2_dev_resize_threads_stop(c);
+
+	/*
+	 * Stop background data movers before disabling writes globally:
+	 * reconcile/copygc move writes don't hold c->writes refs, but they do
+	 * still need journal/btree write access to finish their final index
+	 * updates. If we shut off writes first they'll trip -EROFS during
+	 * shutdown and spuriously account data_update failures.
+	 */
+	bch2_fs_ec_stop(c);
+	bch2_reconcile_stop(c);
+	bch2_copygc_stop(c);
+
+	/*
 	 * Block new foreground-end write operations from starting - any new
 	 * writes will return -EROFS. Set before stopping reconcile so the
 	 * reconcile kthread's child workers (which check this flag to break
@@ -476,8 +503,7 @@ void bch2_fs_read_only(struct bch_fs *c)
 		bch2_verify_accounting_clean(c);
 	} else {
 		/* Make sure error counts/counters are persisted */
-		guard(memalloc_flags)(PF_MEMALLOC_NOFS);
-		guard(mutex)(&c->sb_lock);
+		guard(mutex_noio)(&c->sb_lock);
 		bch2_write_super(c);
 
 		bch_verbose(c, "done going read-only, filesystem not clean");
@@ -603,8 +629,7 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 	set_bit(BCH_FS_was_rw, &c->flags);
 
 	if (test_and_clear_bit(BCH_FS_sb_dirty, &c->flags)) {
-		guard(memalloc_flags)(PF_MEMALLOC_NOFS);
-		guard(mutex)(&c->sb_lock);
+		guard(mutex_noio)(&c->sb_lock);
 		bch2_write_super(c);
 	}
 
@@ -1023,8 +1048,7 @@ static int bch2_fs_opt_version_init(struct bch_fs *c, struct printbuf *out)
 	if (c->opts.journal_rewind)
 		prt_printf(out, "rewinding journal, fsck required\n");
 
-	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
-		guard(mutex)(&c->sb_lock);
+	scoped_guard(mutex_noio, &c->sb_lock) {
 		struct bch_sb_field_ext *ext = bch2_sb_field_get(c->disk_sb.sb, ext);
 
 		__le64 now = cpu_to_le64(ktime_get_real_seconds());
@@ -1157,7 +1181,7 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 	c->disk_sb.fs_sb	= true;
 
 	init_rwsem(&c->state_lock);
-	mutex_init(&c->sb_lock);
+	mutex_noio_init(&c->sb_lock);
 	INIT_WORK(&c->read_only_work, bch2_fs_read_only_work);
 
 	refcount_set(&c->ro_ref, 1);
@@ -1204,8 +1228,7 @@ static int bch2_fs_init(struct bch_fs *c, struct bch_sb *sb,
 
 	try(bch2_fs_capacity_init(c));
 
-	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
-		guard(mutex)(&c->sb_lock);
+	scoped_guard(mutex_noio, &c->sb_lock) {
 		try(bch2_sb_to_fs(c, sb));
 
 		sb = c->disk_sb.sb;
@@ -1552,40 +1575,77 @@ static bool bch2_fs_will_resize_on_mount(struct bch_fs *c)
 
 int bch2_fs_resize_on_mount(struct bch_fs *c)
 {
-	for_each_online_member(c, ca, BCH_DEV_READ_REF_fs_resize_on_mount) {
-		if (bch2_dev_will_resize_on_mount(ca)) {
-			u64 old_nbuckets = ca->mi.nbuckets;
-			u64 new_nbuckets = div64_u64(get_capacity(ca->disk_sb.bdev->bd_disk),
-						     ca->mi.bucket_size);
+	scoped_guard(rwsem_write, &c->state_lock) {
+		for_each_online_member(c, ca, BCH_DEV_READ_REF_fs_resize_on_mount) {
+			if (bch2_dev_will_resize_on_mount(ca)) {
+				u64 old_nbuckets = ca->mi.nbuckets;
+				u64 new_nbuckets = div64_u64(get_capacity(ca->disk_sb.bdev->bd_disk),
+							     ca->mi.bucket_size);
 
-			bch_info_dev(ca, "resizing to size %llu", new_nbuckets * ca->mi.bucket_size);
-			int ret = bch2_dev_buckets_resize(c, ca, new_nbuckets);
-			bch_err_fn_dev(ca, ret);
-			if (ret) {
-				enumerated_ref_put(&ca->io_ref[READ],
-						   BCH_DEV_READ_REF_fs_resize_on_mount);
-				return ret;
-			}
-
-			scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
-				guard(mutex)(&c->sb_lock);
-				struct bch_member *m =
-					bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
-				m->nbuckets = cpu_to_le64(new_nbuckets);
-				SET_BCH_MEMBER_RESIZE_ON_MOUNT(m, false);
-
-				c->disk_sb.sb->features[0] &= ~cpu_to_le64(BIT_ULL(BCH_FEATURE_small_image));
-				bch2_write_super(c);
-			}
-
-			if (ca->mi.freespace_initialized) {
-				ret = __bch2_dev_resize_alloc(ca, old_nbuckets, new_nbuckets);
+				bch_info_dev(ca, "resizing to size %llu", new_nbuckets * ca->mi.bucket_size);
+				int ret = bch2_dev_buckets_resize(c, ca, new_nbuckets);
+				bch_err_fn_dev(ca, ret);
 				if (ret) {
 					enumerated_ref_put(&ca->io_ref[READ],
-							BCH_DEV_READ_REF_fs_resize_on_mount);
+							   BCH_DEV_READ_REF_fs_resize_on_mount);
 					return ret;
 				}
+
+				scoped_guard(mutex_noio, &c->sb_lock) {
+					struct bch_member *m =
+						bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
+					m->nbuckets = cpu_to_le64(new_nbuckets);
+					SET_BCH_MEMBER_RESIZE_ON_MOUNT(m, false);
+
+					c->disk_sb.sb->features[0] &= ~cpu_to_le64(BIT_ULL(BCH_FEATURE_small_image));
+					bch2_write_super(c);
+				}
+
+				if (ca->mi.freespace_initialized) {
+					ret = __bch2_dev_resize_alloc(ca, old_nbuckets, new_nbuckets);
+					if (ret) {
+						enumerated_ref_put(&ca->io_ref[READ],
+								BCH_DEV_READ_REF_fs_resize_on_mount);
+						return ret;
+					}
+				}
 			}
+		}
+	}
+
+	/*
+	 * A pending shrink needs reconcile_scan and backpointer btree access.
+	 * The early resize-on-mount hook runs before btree roots are read so it
+	 * can handle grow-on-mount image expansion; defer shrink resume until a
+	 * later call once BCH_FS_btree_running is set.
+	 */
+	if (!test_bit(BCH_FS_btree_running, &c->flags))
+		return 0;
+
+	if (c->opts.read_only ||
+	    (c->sb.features & (BIT_ULL(BCH_FEATURE_small_image) |
+			       BIT_ULL(BCH_FEATURE_no_default_sb))))
+		return 0;
+
+	for_each_online_member(c, ca, BCH_DEV_READ_REF_fs_resize_on_mount) {
+		if (!bch2_dev_resize_pending(ca))
+			continue;
+
+		CLASS(printbuf, err)();
+		int ret;
+
+		bch_info_dev(ca, "resuming resize to size %llu",
+			     bch2_dev_resize_target(ca) * ca->mi.bucket_size);
+		ret = bch2_dev_resize_resume(c, ca, &err);
+		if (ret) {
+			if (err.pos)
+				bch_err_dev(ca, "%s", err.buf);
+			else
+				bch_err_fn_dev(ca, ret);
+
+			enumerated_ref_put(&ca->io_ref[READ],
+					   BCH_DEV_READ_REF_fs_resize_on_mount);
+			return ret;
 		}
 	}
 	return 0;

@@ -8,6 +8,7 @@ struct bch_member_cpu {
 	u16			first_bucket;   /* index of first bucket used */
 	u16			bucket_size;	/* sectors */
 	u16			group;
+	u16			failure_domain;
 	u8			state;
 	u8			discard;
 	u8			data_allowed;
@@ -19,6 +20,7 @@ struct bch_member_cpu {
 	u8			valid;
 	u8			btree_bitmap_shift;
 	u64			btree_allocated_bitmap;
+	u64 			target_nbuckets; /* 0 => idle, nbuckets => idle, < nbuckets => shrink target, > nbuckets => grow target */
 };
 
 #endif /* _BCACHEFS_SB_MEMBERS_H */

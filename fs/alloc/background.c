@@ -433,8 +433,9 @@
  *   metadata if \texttt{metadata\_target} is not set.
  * \item[\texttt{metadata\_target}] Btree node writes.
  * \item[\texttt{background\_target}] If set, user data is moved to this target
- *   in the background by the reconcile subsystem. The original copy is left in
- *   place but marked as cached.
+ *   in the background by the reconcile subsystem. The durable copies are moved
+ *   off the foreground target; a copy is left on the original target only if it
+ *   is a cache (see \texttt{promote\_target} or \texttt{durability=0}).
  * \item[\texttt{promote\_target}] If set, a cached copy is created on this
  *   target when data is read, if no copy exists there already.
  * \end{description}
@@ -800,13 +801,13 @@ static inline __cold void __bch2_alloc_v4_to_text(struct printbuf *out, struct b
 	bch2_prt_data_type(out, a->data_type);
 	prt_newline(out);
 	prt_printf(out, "journal_seq_nonempty %llu\n",	a->journal_seq_nonempty);
-	if (bkey_val_bytes(k.k) > offsetof(struct bch_alloc_v4, journal_seq_empty))
+	if (bkey_has_field(k.k, alloc_v4, journal_seq_empty))
 		prt_printf(out, "journal_seq_empty    %llu\n",	a->journal_seq_empty);
 
 	prt_printf(out, "need_discard         %llu\n",	BCH_ALLOC_V4_NEED_DISCARD(a));
 	prt_printf(out, "need_inc_gen         %llu\n",	BCH_ALLOC_V4_NEED_INC_GEN(a));
 	prt_printf(out, "dirty_sectors        %u\n",	a->dirty_sectors);
-	if (bkey_val_bytes(k.k) > offsetof(struct bch_alloc_v4, stripe_sectors))
+	if (bkey_has_field(k.k, alloc_v4, stripe_sectors))
 		prt_printf(out, "stripe_sectors       %u\n",	a->stripe_sectors);
 	prt_printf(out, "cached_sectors       %u\n",	a->cached_sectors);
 	prt_printf(out, "stripe_refcount      %u\n",	a->stripe_refcount);
@@ -1097,6 +1098,52 @@ int bch2_alloc_read(struct bch_fs *c)
 
 	bch2_dev_put(ca);
 	return ret;
+}
+
+int bch2_dev_remove_bucket_gens(struct bch_fs *c, struct bch_dev *ca, u64 cutoff)
+{
+	unsigned offset;
+	struct bpos pos = alloc_gens_pos(POS(ca->dev_idx, cutoff), &offset);
+
+	/* cutoff on key boundary */
+	if (!offset)
+		return bch2_btree_delete_range(c, BTREE_ID_bucket_gens,
+					       pos,
+					       POS(ca->dev_idx, U64_MAX),
+					       BTREE_TRIGGER_norun);
+
+	/* Cutoff mid-key
+	 *
+	 * Scope the zero-tail-gens transaction so it is cleared
+	 * before bch2_btree_delete_range creates its own transaction.
+	 */
+	{
+		CLASS(btree_trans, trans)(c);
+
+		/* zero tail gens */
+		try(commit_do(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc, ({
+			CLASS(btree_iter, iter)(trans, BTREE_ID_bucket_gens, pos, BTREE_ITER_intent);
+			struct bkey_s_c k = bkey_try(bch2_btree_iter_peek_slot(&iter));
+
+			try(bkey_err(k));
+
+			if (k.k->type == KEY_TYPE_bucket_gens) {
+				struct bkey_i_bucket_gens *g =
+					errptr_try(bch2_trans_kmalloc(trans, sizeof(*g)));
+
+				bkey_reassemble(&g->k_i, k);
+				memset(&g->v.gens[offset], 0, sizeof(g->v.gens) - offset);
+				try(bch2_trans_update(trans, &iter, &g->k_i, 0));
+			}
+			0;
+		})));
+	}
+
+	/* delete remaining keys */
+	return bch2_btree_delete_range(c, BTREE_ID_bucket_gens,
+				       bpos_nosnap_successor(pos),
+				       POS(ca->dev_idx, U64_MAX),
+				       BTREE_TRIGGER_norun);
 }
 
 /* Free space/discard btree: */
@@ -1488,9 +1535,9 @@ fsck_err:
 	return ret;
 }
 
-/* device removal */
+/* device removal / shrinking */
 
-static int bch2_dev_remove_need_discard(struct bch_fs *c, struct bch_dev *ca)
+static int bch2_dev_remove_need_discard(struct bch_fs *c, struct bch_dev *ca, u64 cutoff)
 {
 	CLASS(btree_trans, trans)(c);
 	unsigned dev_idx = ca->dev_idx;
@@ -1498,37 +1545,39 @@ static int bch2_dev_remove_need_discard(struct bch_fs *c, struct bch_dev *ca)
 	return for_each_btree_key_commit(trans, iter,
 			BTREE_ID_need_discard, POS_MIN,
 			BTREE_ITER_intent|BTREE_ITER_prefetch, k,
-			NULL, NULL, BCH_TRANS_COMMIT_no_enospc, ({
+			NULL, NULL, BCH_WATERMARK_reclaim|
+			BCH_TRANS_COMMIT_no_enospc, ({
 		struct bpos bucket = u64_to_bucket(k.k->p.offset);
-		(bucket.inode == dev_idx)
+		(bucket.inode == dev_idx && bucket.offset >= cutoff)
 			? bch2_btree_delete_at(trans, &iter,
 					       BTREE_TRIGGER_norun)
 			: 0;
 	}));
 }
 
-int bch2_dev_remove_alloc(struct bch_fs *c, struct bch_dev *ca)
+int bch2_dev_remove_alloc(struct bch_fs *c, struct bch_dev *ca, u64 cutoff)
 {
-	struct bpos start	= POS(ca->dev_idx, 0);
+	struct bpos start	= POS(ca->dev_idx, cutoff);
 	struct bpos end		= POS(ca->dev_idx, U64_MAX);
+	struct bpos bp_start	= bucket_pos_to_bp_start(ca, start);
+	struct bpos bp_end	= POS(ca->dev_idx + 1, 0);
 	int ret;
 
 	/*
 	 * We clear the LRU and need_discard btrees first so that we don't race
-	 * with bch2_do_invalidates() and bch2_do_discards_async()
+	 * with bch2_do_invalidates() and bch2_do_discards()
 	 */
-	ret =   bch2_dev_remove_lrus(c, ca) ?:
-		bch2_dev_remove_need_discard(c, ca) ?:
+	ret =   bch2_dev_remove_lrus(c, ca, cutoff) ?:
+		bch2_dev_remove_need_discard(c, ca, cutoff) ?:
 		bch2_btree_delete_range(c, BTREE_ID_freespace, start, end,
 					BTREE_TRIGGER_norun) ?:
-		bch2_btree_delete_range(c, BTREE_ID_backpointers, start, end,
+		bch2_btree_delete_range(c, BTREE_ID_backpointers, bp_start, bp_end,
 					BTREE_TRIGGER_norun) ?:
-		bch2_btree_delete_range(c, BTREE_ID_bucket_gens, start, end,
-					BTREE_TRIGGER_norun) ?:
+		bch2_dev_remove_bucket_gens(c, ca, cutoff) ?:
 		bch2_btree_delete_range(c, BTREE_ID_alloc, start, end,
-					BTREE_TRIGGER_norun) ?:
-		bch2_dev_usage_remove(c, ca);
-	bch_err_msg_dev(ca, ret, "removing dev alloc info");
+					BTREE_TRIGGER_norun);
+	bch_err_msg_dev(ca, ret, "%s dev alloc info",
+			cutoff ? "truncating" : "removing");
 	return ret;
 }
 
@@ -1711,7 +1760,7 @@ void bch2_dev_allocator_remove(struct bch_fs *c, struct bch_dev *ca)
 	 */
 	bch2_recalc_capacity(c);
 
-	bch2_open_buckets_stop(c, ca, false);
+	bch2_open_buckets_stop(c, ca, false, 0);
 
 	/*
 	 * Wake up threads that were blocked on allocation, so they can notice
@@ -1747,7 +1796,7 @@ void bch2_fs_allocator_background_init(struct bch_fs *c)
 
 void bch2_fs_capacity_exit(struct bch_fs *c)
 {
-	percpu_free_rwsem(&c->capacity.mark_lock);
+	percpu_free_rwsem(&c->capacity.mark_lock.lock);
 	if (c->capacity.pcpu) {
 		u64 v = percpu_u64_get(&c->capacity.pcpu->online_reserved);
 		WARN(v, "online_reserved not 0 at shutdown: %lli", v);
@@ -1760,7 +1809,7 @@ int bch2_fs_capacity_init(struct bch_fs *c)
 {
 	spin_lock_init(&c->capacity.sectors_available_lock);
 
-	try(percpu_init_rwsem(&c->capacity.mark_lock));
+	try(percpu_init_rwsem(&c->capacity.mark_lock.lock));
 
 	if (!(c->capacity.pcpu = alloc_percpu(struct bch_fs_capacity_pcpu)))
 		return bch_err_throw(c, ENOMEM_fs_other_alloc);

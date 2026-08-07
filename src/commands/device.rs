@@ -101,8 +101,8 @@ fn cmd_device_add_offline(
     force: bool,
     matches: &clap::ArgMatches,
 ) -> Result<()> {
-    let block_size = unsafe { (*fs.raw).opts.block_size as u32 };
-    let btree_node_size = unsafe { (*fs.raw).opts.btree_node_size };
+    let block_size = fs.opts().block_size as u32;
+    let btree_node_size = fs.opts().btree_node_size;
 
     device_add_format(dev_path, force, matches,
         block_size, btree_node_size)?;
@@ -355,29 +355,30 @@ fn cmd_device_set_state(cli: SetStateCli) -> Result<()> {
 }
 
 fn set_state_offline(device: &str, new_state: u32) -> Result<()> {
-    use crate::wrappers::bch_err_str;
 
-    let c_path = CString::new(device)?;
     let mut opts: c::bch_opts = Default::default();
     opt_set!(opts, nostart, 1);
     opt_set!(opts, degraded, bch_degraded_actions::BCH_DEGRADED_very as u8);
 
     // Read superblock to get dev_idx
-    let mut sb_handle: c::bch_sb_handle = Default::default();
-    let ret = unsafe { c::bch2_read_super(c_path.as_ptr(), &mut opts, &mut sb_handle) };
-    if ret != 0 {
-        return Err(anyhow!("error opening {}: {}", device, bch_err_str(ret)));
-    }
+    let sb_handle = bch_bindgen::sb::io::read_super_opts(Path::new(device), opts)
+        .map_err(|e| anyhow!("error opening {}: {}", device, e))?;
     let dev_idx = sb_handle.sb().dev_idx as u32;
     drop(sb_handle);
 
     let fs = crate::device_scan::open_scan(&[PathBuf::from(device)], opts)
         .map_err(|e| anyhow!("Error opening filesystem: {}", e))?;
 
+    if fs.disk_sb().sb().sb_initialized() == 0 {
+        return Err(anyhow!("superblock not initialized (filesystem was never started): \
+                            bch2_write_super would silently skip the write; mount it once first"));
+    }
+
     {
         let _lock = fs.sb_lock();
         unsafe { fs.member_mut(dev_idx) }.set_member_state(new_state as u64);
-        fs.write_super();
+        fs.write_super_force()
+            .map_err(|e| anyhow!("error writing superblock: {}", e))?;
     }
     Ok(())
 }
@@ -388,25 +389,38 @@ pub struct ResizeCli {
     /// Device path
     device: String,
 
-    /// New size (human-readable, e.g. 1G); defaults to device size
+    /// New size (human-readable, e.g. 1G) or "cancel" (resizes to the currently persisted size); defaults to device size
     size: Option<String>,
 }
 
+enum SizeOrCancel {
+    Size(u64),
+    Cancel,
+}
 fn cmd_device_resize(cli: ResizeCli) -> Result<()> {
+    use SizeOrCancel::*;
 
     let size_bytes = match cli.size {
-        Some(ref s) => parse_human_size(s)?,
-        None => device_size(&cli.device)?,
+        Some(ref s) => match s.as_str() {
+            "cancel" | "Cancel" => Cancel,
+            other => Size(parse_human_size(other)?),
+        },
+        None => Size(device_size(&cli.device)?),
     };
-    let size_sectors = size_bytes >> 9;
+    let size_sectors = match size_bytes {
+        Size(bytes) => Size(bytes >> 9),
+        Cancel => Cancel,
+    };
 
     match open_dev(&cli.device) {
         Ok((handle, dev_idx)) => {
             println!("Doing online resize of {}", cli.device);
 
-            let usage = handle.dev_usage(dev_idx)
-                .context("querying device usage")?;
-            let nbuckets = size_sectors / usage.bucket_size as u64;
+            let usage = handle.dev_usage(dev_idx).context("querying device usage")?;
+            let nbuckets = match size_sectors {
+                Size(sectors) => sectors / usage.bucket_size as u64,
+                Cancel => usage.nr_buckets,
+            };
             let shrinking = nbuckets < usage.nr_buckets;
 
             println!("resizing {} to {} buckets", cli.device, nbuckets);
@@ -422,7 +436,7 @@ fn cmd_device_resize(cli: ResizeCli) -> Result<()> {
         Err(_) if Path::new(&cli.device).exists() => {
             println!("Doing offline resize of {}", cli.device);
             resize_offline(&cli.device, size_sectors)?;
-        }
+        },
         Err(e) => return Err(e),
     }
 
@@ -453,8 +467,10 @@ fn find_single_online_dev(fs: &Fs) -> Result<bcachefs_kernel::fs::DevRef> {
         .ok_or_else(|| anyhow!("could not get reference to device {}", found_idx))
 }
 
-fn resize_offline(device: &str, size_sectors: u64) -> Result<()> {
+fn resize_offline(device: &str, size_sectors: SizeOrCancel) -> Result<()> {
     use bcachefs_kernel::util::printbuf::Printbuf;
+    use SizeOrCancel::*;
+
 
     let opts: c::bch_opts = Default::default();
     let fs = crate::device_scan::open_scan(&[PathBuf::from(device)], opts)
@@ -462,7 +478,10 @@ fn resize_offline(device: &str, size_sectors: u64) -> Result<()> {
 
     let ca = find_single_online_dev(&fs)?;
 
-    let nbuckets = size_sectors / ca.mi.bucket_size as u64;
+    let nbuckets = match size_sectors {
+        Size(sectors) => sectors / ca.mi.bucket_size as u64,
+        Cancel => ca.mi.nbuckets,
+    };
 
     if nbuckets < ca.mi.nbuckets {
         bail!("shrinking not supported (requested {} buckets, have {})",
