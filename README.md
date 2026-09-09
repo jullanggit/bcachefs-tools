@@ -1,4 +1,4 @@
-Development is happening on the [shrink branch](https://github.com/jullanggit/bcachefs-tools/edit/master/README.md)!
+Development is happening on the [shrink branch](https://github.com/jullanggit/bcachefs-tools/tree/shrink)!
 
 bcachefs-tools
 ==============
